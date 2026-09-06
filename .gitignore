@@ -1,0 +1,5 @@
+.flowdiff/
+__pycache__/
+*.pyc
+dist/
+*.egg-info/

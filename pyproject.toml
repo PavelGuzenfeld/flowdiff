@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flowdiff"
+version = "0.0.1"
+description = "Turn a code change into a runnable, comparable flow: LSP call graph of the changed symbols, a harness that drives it, a before/after trace."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+flowdiff = "flowdiff.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["flowdiff*"]
+
+[tool.setuptools.package-data]
+flowdiff = ["hints/*.yml"]
