@@ -1,0 +1,8 @@
+id: gobject-vfunc
+language: cpp
+message: vfunc registration
+rule:
+  pattern: $K->$SLOT = $FN
+  has:
+    field: right
+    kind: identifier
