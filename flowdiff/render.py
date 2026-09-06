@@ -14,7 +14,7 @@ MAX_NAMES_IN_VERDICT = 6
 
 def label(node: Node) -> str:
     text = f"{node.name}{node.marker}"
-    return text.replace("]", ")").replace("[", "(").replace("#", "")
+    return text.replace("]", ")").replace("[", "(").replace("#", "").replace("|", "/")
 
 
 def graph_easy_source(flow: Flow) -> str:

@@ -92,12 +92,18 @@ def build_graph(client: LspClient, changed: list[ChangedSymbol], hops: int) -> G
         seen.add(nid)
         item = items[nid]
         for call in client.incoming_calls(item):
-            src = g.add(node_of(item_symbol(call["from"])))
+            sym = item_symbol(call["from"])
+            if not sym.path.is_relative_to(client.root):
+                continue
+            src = g.add(node_of(sym))
             g.edges.add(Edge(src.id, nid))
             items.setdefault(src.id, call["from"])
             frontier.append((src.id, depth + 1))
         for call in client.outgoing_calls(item):
-            dst = g.add(node_of(item_symbol(call["to"])))
+            sym = item_symbol(call["to"])
+            if not sym.path.is_relative_to(client.root):
+                continue
+            dst = g.add(node_of(sym))
             g.edges.add(Edge(nid, dst.id))
             items.setdefault(dst.id, call["to"])
             frontier.append((dst.id, depth + 1))
