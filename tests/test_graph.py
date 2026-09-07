@@ -1,4 +1,7 @@
+import dataclasses
 from pathlib import Path
+
+import pytest
 
 from flowdiff import graph
 from flowdiff.changes import ChangedSymbol
@@ -19,6 +22,36 @@ def chain(*names: str, statuses: dict[str, str] | None = None) -> Graph:
     for a, b in zip(names, names[1:]):
         g.edges.add(Edge(a, b))
     return g
+
+
+def test_node_and_edge_defaults():
+    n = Node("i", "n", ROOT / "m.py", 1, 2)
+    assert n.status == "unchanged" and n.marker == ""
+    assert Edge("a", "b").kind == "call"
+
+
+def test_nodes_and_edges_are_hashable_and_immutable():
+    """Nodes are dict keys and edges live in a set, so both must stay frozen."""
+    n = Node("i", "n", ROOT / "m.py", 1, 2)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        n.status = "body"  # type: ignore[misc]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        Edge("a", "b").kind = "registered"  # type: ignore[misc]
+    assert len({Edge("a", "b"), Edge("a", "b")}) == 1
+
+
+def test_components_separates_three_groups():
+    g = chain("a", "b")
+    g.add(node("c"))
+    g.add(node("d"))
+    g.edges.add(Edge("c", "d"))
+    g.add(node("e"))
+    assert sorted(graph.components(g, ["a", "c", "e"], [])) == [["a"], ["c"], ["e"]]
+
+
+def test_components_keeps_members_in_the_given_order():
+    g = chain("a", "b", "c")
+    assert graph.components(g, ["c", "a"], []) == [["c", "a"]]
 
 
 def test_markers_and_stability():

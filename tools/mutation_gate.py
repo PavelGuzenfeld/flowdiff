@@ -13,6 +13,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 PACKAGE = Path("flowdiff")
+# Rewording help text, log lines and error messages is not a defect; pinning that prose in a
+# test would lock wording rather than behaviour.
+DISABLED_MUTATIONS = "string,fstring"
 _LOCAL_MUTMUT = Path(sys.executable).with_name("mutmut")
 MUTMUT = str(_LOCAL_MUTMUT) if _LOCAL_MUTMUT.exists() else "mutmut"
 
@@ -24,15 +27,17 @@ def touched_modules(base: str) -> list[str]:
 
 
 def tests_for(module: str) -> str:
-    """A module's own test file, so a mutant does not pay for the whole suite."""
-    candidate = Path("tests") / f"test_{Path(module).stem}.py"
-    return str(candidate) if candidate.is_file() else "tests"
+    """A module's own test files, so a mutant does not pay for the whole suite."""
+    stem = Path(module).stem
+    matches = sorted(str(p) for p in Path("tests").glob(f"test_{stem}*.py"))
+    return " ".join(matches) if matches else "tests"
 
 
 def isolated_copy(dest: Path) -> None:
     """mutmut rewrites sources in place, so it only ever runs on a throwaway copy."""
-    for name in subprocess.run(["git", "ls-files"], check=True, capture_output=True,
-                               text=True).stdout.split():
+    listing = subprocess.run(["git", "ls-files", "--cached", "--others", "--exclude-standard"],
+                             check=True, capture_output=True, text=True)
+    for name in listing.stdout.split():
         target = dest / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(name, target)
@@ -74,22 +79,34 @@ def survivor_report(workdir: Path, limit: int) -> str:
 
 
 class Result:
-    def __init__(self, module: str, counts: dict[str, tuple[int, int]], survivors: str, seconds: float):
+    def __init__(self, module: str, counts: dict[str, tuple[int, int]], survivors: str,
+                 seconds: float, log: str = ""):
         self.module = module
         self.counts = counts
         self.survivors = survivors
         self.seconds = seconds
+        self.log = log
+
+    @property
+    def killed(self) -> int:
+        return sum(k for k, _ in self.counts.values())
+
+    @property
+    def total(self) -> int:
+        return sum(t for _, t in self.counts.values())
 
     def score(self) -> float:
-        killed = sum(k for k, _ in self.counts.values())
-        total = sum(t for _, t in self.counts.values())
-        return 100.0 * killed / total if total else 100.0
+        return 100.0 * self.killed / self.total if self.total else 0.0
+
+    def passed(self, threshold: float) -> bool:
+        """No mutants means mutmut never ran; that is a broken gate, never a pass."""
+        return self.total > 0 and self.score() >= threshold
 
     def line(self, threshold: float) -> str:
-        killed = sum(k for k, _ in self.counts.values())
-        total = sum(t for _, t in self.counts.values())
-        verdict = "ok" if self.score() >= threshold else "BELOW THRESHOLD"
-        return f"{self.module:<24} {killed:>4}/{total:<4} {self.score():6.1f}%  {self.seconds:5.0f}s  {verdict}"
+        if self.total == 0:
+            return f"{self.module:<24} {'no mutants generated — mutmut failed':<28} {self.seconds:5.0f}s  ERROR"
+        verdict = "ok" if self.passed(threshold) else "BELOW THRESHOLD"
+        return f"{self.module:<24} {self.killed:>4}/{self.total:<4} {self.score():6.1f}%  {self.seconds:5.0f}s  {verdict}"
 
 
 def measure(module: str, threshold: float, survivor_limit: int) -> Result:
@@ -98,12 +115,13 @@ def measure(module: str, threshold: float, survivor_limit: int) -> Result:
         workdir = Path(tmp)
         isolated_copy(workdir)
         runner = f"{sys.executable} -m pytest -x -q -p no:cacheprovider {tests_for(module)}"
-        mutmut_in(workdir, "run", "--paths-to-mutate", module, "--tests-dir", "tests",
-                  "--runner", runner, "--no-progress")
+        run = mutmut_in(workdir, "run", "--paths-to-mutate", module, "--tests-dir", "tests",
+                        "--runner", runner, "--no-progress",
+                        "--disable-mutation-types", DISABLED_MUTATIONS)
         counts = scores(ET.fromstring(mutmut_in(workdir, "junitxml", check=True).stdout))
         elapsed = time.monotonic() - started
-        result = Result(module, counts, "", elapsed)
-        if result.score() < threshold:
+        result = Result(module, counts, "", elapsed, log=(run.stdout + run.stderr).strip())
+        if result.total and not result.passed(threshold):
             result.survivors = survivor_report(workdir, survivor_limit)
         return result
 
@@ -135,9 +153,12 @@ def main(argv: list[str] | None = None) -> int:
             results.append(result)
             print(result.line(args.threshold), flush=True)
 
-    failed = [r for r in results if r.score() < args.threshold]
+    failed = [r for r in results if not r.passed(args.threshold)]
     for r in failed:
-        print(f"\n=== surviving mutants in {r.module} ===\n{r.survivors}")
+        if r.total == 0:
+            print(f"\n=== mutmut produced no mutants for {r.module} ===\n{r.log[-3000:]}")
+        else:
+            print(f"\n=== surviving mutants in {r.module} ===\n{r.survivors}")
     return 1 if failed else 0
 
 
