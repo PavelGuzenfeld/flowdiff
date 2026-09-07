@@ -10,6 +10,9 @@ license = "MIT"
 requires-python = ">=3.12"
 dependencies = []
 
+[project.optional-dependencies]
+dev = ["pytest>=8", "mutmut==2.5.1", "ast-grep-cli", "pyright"]
+
 [project.scripts]
 flowdiff = "flowdiff.cli:main"
 
@@ -18,3 +21,7 @@ include = ["flowdiff*"]
 
 [tool.setuptools.package-data]
 flowdiff = ["hints/*.yml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

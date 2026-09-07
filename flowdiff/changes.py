@@ -115,29 +115,36 @@ def changed_symbols(client: LspClient, revs: Revisions, hunks: list[Hunk],
         base_syms = [s for s in client.document_symbols(abs_path) if s.kind in TRACKED_KINDS]
         client.open(abs_path, head_text)
         head_syms = [s for s in client.document_symbols(abs_path) if s.kind in TRACKED_KINDS]
+        result += classify(head_syms, base_syms, file_hunks, head_text, base_text,
+                           ast_grep_language, rel.suffix)
+    return result
 
-        base_by_key = {(s.name, s.kind): s for s in base_syms}
-        head_by_key = {(s.name, s.kind): s for s in head_syms}
 
-        for sym in head_syms:
-            if not any(sym.range.overlaps_lines(*h.new_span()) for h in file_hunks):
-                continue
-            base = base_by_key.get((sym.name, sym.kind))
-            if base is None:
-                result.append(ChangedSymbol(sym, "added"))
-                continue
-            head_norm = normalized(ast_grep_language, rel.suffix, sym.range.slice(head_text))
-            base_norm = normalized(ast_grep_language, rel.suffix, base.range.slice(base_text))
-            if head_norm == base_norm:
-                continue
-            drifted = signature_text(sym, head_text) != signature_text(base, base_text)
-            result.append(ChangedSymbol(sym, "signature" if drifted else "body"))
+def classify(head_syms: list[Symbol], base_syms: list[Symbol], hunks: list[Hunk],
+             head_text: str, base_text: str, language: str, suffix: str) -> list[ChangedSymbol]:
+    base_by_key = {(s.name, s.kind): s for s in base_syms}
+    head_by_key = {(s.name, s.kind): s for s in head_syms}
+    result: list[ChangedSymbol] = []
 
-        for sym in base_syms:
-            if (sym.name, sym.kind) in head_by_key:
-                continue
-            if any(sym.range.overlaps_lines(*h.old_span()) for h in file_hunks):
-                result.append(ChangedSymbol(sym, "removed"))
+    for sym in head_syms:
+        if not any(sym.range.overlaps_lines(*h.new_span()) for h in hunks):
+            continue
+        base = base_by_key.get((sym.name, sym.kind))
+        if base is None:
+            result.append(ChangedSymbol(sym, "added"))
+            continue
+        head_norm = normalized(language, suffix, sym.range.slice(head_text))
+        base_norm = normalized(language, suffix, base.range.slice(base_text))
+        if head_norm == base_norm:
+            continue
+        drifted = signature_text(sym, head_text) != signature_text(base, base_text)
+        result.append(ChangedSymbol(sym, "signature" if drifted else "body"))
+
+    for sym in base_syms:
+        if (sym.name, sym.kind) in head_by_key:
+            continue
+        if any(sym.range.overlaps_lines(*h.old_span()) for h in hunks):
+            result.append(ChangedSymbol(sym, "removed"))
     return result
 
 
