@@ -1,15 +1,20 @@
-"""Run mutmut over the modules a branch touches and fail below a mutation-score threshold."""
+"""Run mutmut per touched module, in parallel throwaway copies, and fail below a score threshold."""
 from __future__ import annotations
 
 import argparse
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
+import time
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 PACKAGE = Path("flowdiff")
-MUTMUT = str(Path(sys.executable).with_name("mutmut")) if Path(sys.executable).with_name("mutmut").exists() else "mutmut"
+_LOCAL_MUTMUT = Path(sys.executable).with_name("mutmut")
+MUTMUT = str(_LOCAL_MUTMUT) if _LOCAL_MUTMUT.exists() else "mutmut"
 
 
 def touched_modules(base: str) -> list[str]:
@@ -18,15 +23,27 @@ def touched_modules(base: str) -> list[str]:
     return sorted(p for p in out.split() if Path(p).is_file() and Path(p).name != "__init__.py")
 
 
-def run_mutmut(paths: list[str]) -> ET.Element:
-    subprocess.run([MUTMUT, "run", "--paths-to-mutate", ",".join(paths), "--tests-dir", "tests",
-                    "--runner", f"{sys.executable} -m pytest -x -q tests", "--no-progress"], check=False)
-    xml = subprocess.run([MUTMUT, "junitxml"], check=True, capture_output=True, text=True).stdout
-    return ET.fromstring(xml)
+def tests_for(module: str) -> str:
+    """A module's own test file, so a mutant does not pay for the whole suite."""
+    candidate = Path("tests") / f"test_{Path(module).stem}.py"
+    return str(candidate) if candidate.is_file() else "tests"
+
+
+def isolated_copy(dest: Path) -> None:
+    """mutmut rewrites sources in place, so it only ever runs on a throwaway copy."""
+    for name in subprocess.run(["git", "ls-files"], check=True, capture_output=True,
+                               text=True).stdout.split():
+        target = dest / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(name, target)
+
+
+def mutmut_in(workdir: Path, *args: str, check: bool = False) -> subprocess.CompletedProcess[str]:
+    return subprocess.run([MUTMUT, *args], check=check, capture_output=True, text=True, cwd=workdir)
 
 
 def scores(report: ET.Element) -> dict[str, tuple[int, int]]:
-    """path -> (killed, total); a testcase with a failure child is a surviving mutant."""
+    """path -> (killed, total); a testcase with a failure or error child is a surviving mutant."""
     per_file: dict[str, list[int]] = {}
     for case in report.iter("testcase"):
         path = case.get("file") or case.get("name", "").split(":")[0]
@@ -41,7 +58,7 @@ def survivor_ids(results_text: str) -> list[int]:
     """`mutmut results` lists survivors as '1-3, 7, 12'; expand to ids."""
     ids: list[int] = []
     for line in results_text.splitlines():
-        if not re.fullmatch(r"[\d,\s-]+", line.strip()) or not line.strip():
+        if not line.strip() or not re.fullmatch(r"[\d,\s-]+", line.strip()):
             continue
         for part in line.replace(" ", "").split(","):
             lo, _, hi = part.partition("-")
@@ -50,11 +67,45 @@ def survivor_ids(results_text: str) -> list[int]:
     return ids
 
 
-def show_survivors(limit: int = 60) -> None:
-    results = subprocess.run([MUTMUT, "results"], capture_output=True, text=True).stdout
-    print(results)
-    for mid in survivor_ids(results)[:limit]:
-        print(subprocess.run([MUTMUT, "show", str(mid)], capture_output=True, text=True).stdout)
+def survivor_report(workdir: Path, limit: int) -> str:
+    results = mutmut_in(workdir, "results").stdout
+    shown = [mutmut_in(workdir, "show", str(mid)).stdout for mid in survivor_ids(results)[:limit]]
+    return "\n".join([results, *shown])
+
+
+class Result:
+    def __init__(self, module: str, counts: dict[str, tuple[int, int]], survivors: str, seconds: float):
+        self.module = module
+        self.counts = counts
+        self.survivors = survivors
+        self.seconds = seconds
+
+    def score(self) -> float:
+        killed = sum(k for k, _ in self.counts.values())
+        total = sum(t for _, t in self.counts.values())
+        return 100.0 * killed / total if total else 100.0
+
+    def line(self, threshold: float) -> str:
+        killed = sum(k for k, _ in self.counts.values())
+        total = sum(t for _, t in self.counts.values())
+        verdict = "ok" if self.score() >= threshold else "BELOW THRESHOLD"
+        return f"{self.module:<24} {killed:>4}/{total:<4} {self.score():6.1f}%  {self.seconds:5.0f}s  {verdict}"
+
+
+def measure(module: str, threshold: float, survivor_limit: int) -> Result:
+    started = time.monotonic()
+    with tempfile.TemporaryDirectory(prefix="flowdiff-mutants-") as tmp:
+        workdir = Path(tmp)
+        isolated_copy(workdir)
+        runner = f"{sys.executable} -m pytest -x -q -p no:cacheprovider {tests_for(module)}"
+        mutmut_in(workdir, "run", "--paths-to-mutate", module, "--tests-dir", "tests",
+                  "--runner", runner, "--no-progress")
+        counts = scores(ET.fromstring(mutmut_in(workdir, "junitxml", check=True).stdout))
+        elapsed = time.monotonic() - started
+        result = Result(module, counts, "", elapsed)
+        if result.score() < threshold:
+            result.survivors = survivor_report(workdir, survivor_limit)
+        return result
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -62,21 +113,31 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--base", default="origin/main")
     ap.add_argument("--threshold", type=float, default=80.0)
     ap.add_argument("--paths", nargs="*", help="override the touched-module detection")
+    ap.add_argument("--jobs", type=int, default=4, help="modules measured concurrently")
+    ap.add_argument("--survivors", type=int, default=40, help="surviving mutants to print per module")
     args = ap.parse_args(argv)
 
     paths = args.paths or touched_modules(args.base)
     if not paths:
         print("mutation gate: no package modules touched")
         return 0
-    report = run_mutmut(paths)
-    failed = False
-    for path, (killed, total) in sorted(scores(report).items()):
-        score = 100.0 * killed / total if total else 100.0
-        verdict = "ok" if score >= args.threshold else "BELOW THRESHOLD"
-        failed |= score < args.threshold
-        print(f"{path:<32} {killed:>4}/{total:<4} {score:6.1f}%  {verdict}")
-    if failed:
-        show_survivors()
+
+    print(f"mutating {len(paths)} module(s) with {min(args.jobs, len(paths))} job(s); "
+          f"threshold {args.threshold:.0f}%", flush=True)
+    for module in paths:
+        print(f"  {module} against {tests_for(module)}", flush=True)
+
+    results: list[Result] = []
+    with ThreadPoolExecutor(max_workers=max(1, min(args.jobs, len(paths)))) as pool:
+        futures = {pool.submit(measure, m, args.threshold, args.survivors): m for m in paths}
+        for future in as_completed(futures):
+            result = future.result()
+            results.append(result)
+            print(result.line(args.threshold), flush=True)
+
+    failed = [r for r in results if r.score() < args.threshold]
+    for r in failed:
+        print(f"\n=== surviving mutants in {r.module} ===\n{r.survivors}")
     return 1 if failed else 0
 
 
