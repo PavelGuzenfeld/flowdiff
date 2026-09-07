@@ -1,4 +1,5 @@
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -46,6 +47,63 @@ def test_missing_base_file_reads_empty(repo: Path):
     assert Revisions(repo, "HEAD", None).read_base(Path("nope.py")) == ""
 
 
+def test_new_file_in_ref_mode_has_zero_old_span(repo: Path):
+    (repo / "b.py").write_text("x = 1\n")
+    git(repo, "add", "b.py")
+    git(repo, "commit", "-q", "-m", "add b")
+    hunks = diff_hunks(Revisions(repo, "HEAD~1", "HEAD"))
+    assert hunks == [Hunk(Path("b.py"), 0, 0, 1, 1)]
+
+
+def test_git_failures_raise(repo: Path):
+    with pytest.raises(subprocess.CalledProcessError):
+        changes.git(repo, "definitely-not-a-git-verb")
+
+
+def test_markers_cover_every_status():
+    s = sym("f", 12, 0, 1)
+    assert [changes.ChangedSymbol(s, st).marker for st in ("body", "signature", "added", "removed")] == ["~", "~", "+", "-"]
+
+
+class FakeClient:
+    """Answers document_symbols from whatever text was opened last; tracks kinds seen."""
+
+    def __init__(self, symbols_by_text: dict[str, list[Symbol]]):
+        self.symbols_by_text = symbols_by_text
+        self.opened: list[tuple[Path, str]] = []
+
+    def open(self, path: Path, text: str) -> None:
+        self.opened.append((path, text))
+
+    def document_symbols(self, path: Path) -> list[Symbol]:
+        return self.symbols_by_text[self.opened[-1][1]]
+
+
+def test_changed_symbols_opens_base_then_head_and_filters_kinds(repo: Path, no_ast_grep):
+    head_text = SOURCE.replace("x + 1", "x + 2")
+    (repo / "a.py").write_text(head_text)
+    variable = sym("CONST", 13, 0, 0)
+    f = sym("f", 12, 0, 1, "(x)")
+    g = sym("g", 12, 4, 5, "(y)")
+    client = FakeClient({SOURCE: [f, g, variable], head_text: [f, g, variable]})
+    revs = Revisions(repo, "HEAD", None)
+    result = changes.changed_symbols(client, revs, diff_hunks(revs), "python")  # type: ignore[arg-type]
+    assert [(c.symbol.name, c.status) for c in result] == [("f", "body")]
+    assert [t for _, t in client.opened] == [SOURCE, head_text]
+    assert client.opened[0][0] == (repo / "a.py").resolve()
+
+
+def test_changed_symbols_groups_hunks_per_file(repo: Path, no_ast_grep):
+    (repo / "a.py").write_text(SOURCE.replace("x + 1", "x + 2"))
+    (repo / "b.py").write_text("def h():\n    return 0\n")
+    f = sym("f", 12, 0, 1, "(x)")
+    h = sym("h", 12, 0, 1, "()", path=str(repo / "b.py"))
+    client = FakeClient({SOURCE: [f], SOURCE.replace("x + 1", "x + 2"): [f], "": [], "def h():\n    return 0\n": [h]})
+    revs = Revisions(repo, "HEAD", None)
+    result = changes.changed_symbols(client, revs, diff_hunks(revs), "python")  # type: ignore[arg-type]
+    assert sorted((c.symbol.name, c.status) for c in result) == [("f", "body"), ("h", "added")]
+
+
 def test_hunk_spans_are_zero_based_and_inclusive():
     assert Hunk(Path("x"), 10, 3, 12, 0).old_span() == (9, 11)
     assert Hunk(Path("x"), 10, 3, 12, 0).new_span() == (11, 11)
@@ -64,10 +122,26 @@ def test_comment_spans_empty_text_is_empty():
     assert changes.comment_spans("python", ".py", "   \n") == []
 
 
+def test_comment_spans_empty_when_ast_grep_fails(monkeypatch):
+    class Broken:
+        returncode = 2
+        stdout = ""
+    monkeypatch.setattr(changes.subprocess, "run", lambda *a, **k: Broken())
+    assert changes.comment_spans("python", ".py", "x = 1  # c\n") == []
+
+
+@pytest.mark.skipif(shutil.which("ast-grep") is None, reason="ast-grep not installed")
+def test_comment_spans_are_character_offsets_not_bytes():
+    text = "s = 'é'  # c\n"
+    spans = changes.comment_spans("python", ".py", text)
+    assert [text[a:b] for a, b in spans] == ["# c"]
+
+
 def test_signature_text_prefers_detail_then_selection_line():
     with_detail = sym("f", 12, 0, 2, detail="(x: int) -> int")
     assert changes.signature_text(with_detail, "def f(x):\n") == "(x: int) -> int"
     assert changes.signature_text(sym("f", 12, 0, 2), "def f( x ):\n    pass\n") == "deff(x):"
+    assert changes.signature_text(sym("f", 12, 5, 6), "def f():\n") == ""
 
 
 @pytest.fixture

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
@@ -35,6 +36,26 @@ def scores(report: ET.Element) -> dict[str, tuple[int, int]]:
     return {p: (k, t) for p, (k, t) in per_file.items()}
 
 
+def survivor_ids(results_text: str) -> list[int]:
+    """`mutmut results` lists survivors as '1-3, 7, 12'; expand to ids."""
+    ids: list[int] = []
+    for line in results_text.splitlines():
+        if not re.fullmatch(r"[\d,\s-]+", line.strip()) or not line.strip():
+            continue
+        for part in line.replace(" ", "").split(","):
+            lo, _, hi = part.partition("-")
+            if lo.isdigit():
+                ids.extend(range(int(lo), int(hi or lo) + 1))
+    return ids
+
+
+def show_survivors(limit: int = 60) -> None:
+    results = subprocess.run(["mutmut", "results"], capture_output=True, text=True).stdout
+    print(results)
+    for mid in survivor_ids(results)[:limit]:
+        print(subprocess.run(["mutmut", "show", str(mid)], capture_output=True, text=True).stdout)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--base", default="origin/main")
@@ -53,6 +74,8 @@ def main(argv: list[str] | None = None) -> int:
         verdict = "ok" if score >= args.threshold else "BELOW THRESHOLD"
         failed |= score < args.threshold
         print(f"{path:<32} {killed:>4}/{total:<4} {score:6.1f}%  {verdict}")
+    if failed:
+        show_survivors()
     return 1 if failed else 0
 
 
