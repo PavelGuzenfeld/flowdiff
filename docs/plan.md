@@ -159,6 +159,18 @@ Targets a mid-edit loop (working tree vs HEAD), not only PR review.
     for Python; plain asserts when nothing matches.
 49. Implementation order is the language-agnostic spine first, then the Python half
     end-to-end, then the C++ half, then `keep`.
+50. After the M1 baseline, every change lands through a pull request against `main`;
+    nothing is pushed to `main` directly.
+51. CI runs on every pull request: the unit tests (pytest) and mutation tests (mutmut)
+    over the package. The check is red when any unit test fails or the mutation score
+    on the modules the PR touches is below 80 %. The threshold is a starting value.
+52. A pull request merges only after Pavel approves it on the strength of that
+    milestone's integration test, which he runs himself and which is named in the
+    Steps table. Green unit and mutation results are the floor, not the approval.
+53. pytest and mutmut are development dependencies only; decision 5 — standard library
+    at runtime — is unchanged.
+54. Each remaining milestone is a GitHub issue carrying its acceptance criteria and its
+    integration test; the milestone's pull request closes it.
 
 ## Open questions
 
@@ -171,6 +183,9 @@ Targets a mid-edit loop (working tree vs HEAD), not only PR review.
   target is a static archive, which has no `NEEDED` list; the consumer executable's
   list would have to stand in for it.
 - PyPI packaging and the binary's distribution are unaddressed; v1 is a git clone.
+- Whether mutmut's mutation score is meaningful for the LSP client, whose behaviour
+  is mostly I/O against a fake server; the 80 % threshold of decision 51 may need to
+  exclude `lsp.py` or be judged per module.
 
 ### Resolved during planning
 
@@ -190,8 +205,16 @@ time, for its own test suite, and flowdiff simply plays the build it is handed.
 
 ## Steps
 
-**M1 — spine** (~885 lines). No language-specific code. Ends with `flowdiff` (no
-`play`) rendering a correct marked graph for a real change in this repo.
+Every step from M1b on is one pull request with CI (decision 51) and one integration
+test that Pavel runs before approving (decision 52). Line counts are additions.
+
+**M1 — spine** — **done**, commits `b35430a`…`858b900`, 903 lines, merged directly as
+the baseline before decision 50 applied. Accepted on a one-function edit rendering
+`label~` with its callees and entry `label`. Two departures from the table below:
+`--split` is deferred until M2 has a base graph to split against, and untracked files
+count as whole-file hunks because `git diff HEAD` never lists them. A node cap (24,
+`--full` overrides) with a per-file compact view was added after the first run drew
+90 nodes.
 
 | | | |
 |---|---|---|
@@ -202,9 +225,18 @@ time, for its own test suite, and flowdiff simply plays the build it is handed.
 | `render.py` | merged graph, markers, verdict line, `show` rendering | ~180 |
 | `hints/gobject.yml` | the one framework rule v1 ships | ~15 |
 
-**M2 — Python end-to-end** (~610 lines). No container, no compile, no linking. Ends
-with flowdiff self-hosting: a change to `graph.py` produces a played flow through its
-own code.
+**M1b — tests and CI for the spine** (~400 lines). Unit tests for hunk parsing, symbol
+intersection and the formatting-only drop, entry selection and frame computation,
+render fallback and the node cap, plus a fake language server for the client's framing
+and server-request replies. A GitHub Actions workflow running pytest and mutmut per
+decision 51. *Integration test:* `flowdiff` on a one-function edit in this repo renders
+the marked flow, and CI is green on the PR itself.
+
+**M2 — Python end-to-end** (~610 lines, plus its tests). No container, no compile, no
+linking. Ends with flowdiff self-hosting: a change to `graph.py` produces a played flow
+through its own code. *Integration test:* `flowdiff play` on a one-function edit in this
+repo prints a graph and verdict; `flowdiff show <frame>` prints before/after values
+that differ where the edit differs.
 
 | | | |
 |---|---|---|
@@ -214,8 +246,11 @@ own code.
 | `trace_py.py` | `sys.monitoring` + fallback, JSONL emit | ~160 |
 | `summarise.py` | built-ins, project hook loading | ~170 |
 
-**M3 — C++ end-to-end** (~720 lines). Every hard risk lives here. Ends with the
-`gst-nvmm-cpp` demo flow played inside the container layer.
+**M3 — C++ end-to-end** (~720 lines, plus its tests). Every hard risk lives here. Ends
+with the `gst-nvmm-cpp` demo flow played inside the container layer. *Integration test:*
+in a `gst-nvmm-cpp` checkout with a crop-related edit, `flowdiff play` builds both sides
+in `flowdiff/gst-nvmm-cpp:dev`, traces under gdb, and the verdict names the mock build
+variant and the origin frame.
 
 | | | |
 |---|---|---|
@@ -224,13 +259,16 @@ own code.
 | `trace_gdb.py` | generated gdb script, breakpoints, summarisers, JSONL | ~220 |
 | build hook in `worktree.py` | incremental base rebuild | ~70 |
 
-**M4 — keep** (~160 lines). Dialect detection and golden-test emission.
+**M4 — keep** (~160 lines, plus its tests). Dialect detection and golden-test emission.
+*Integration test:* `flowdiff keep` after an M2 or M3 play writes a test file in the
+repo's dialect that passes on head under the repo's own runner.
 
-**M5 — demo and docs** (~370 lines). README with one worked C++ flow and one
-self-hosted Python flow, plus flowdiff's own test suite.
+**M5 — demo and docs** (~120 lines). README with one worked C++ flow and one
+self-hosted Python flow, each reproduced from a clean clone. *Integration test:* the
+README commands run as written.
 
-Roughly 2,750 lines total. This is a substantial build, not a weekend script — the
-milestone boundaries are the places to stop and reassess.
+Roughly 2,900 lines total including tests. This is a substantial build, not a weekend
+script — the milestone boundaries are the places to stop and reassess.
 
 ## Risks and rejected alternatives
 
