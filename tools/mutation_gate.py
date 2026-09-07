@@ -2,13 +2,11 @@
 from __future__ import annotations
 
 import argparse
-import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
-import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -47,39 +45,27 @@ def mutmut_in(workdir: Path, *args: str, check: bool = False) -> subprocess.Comp
     return subprocess.run([MUTMUT, *args], check=check, capture_output=True, text=True, cwd=workdir)
 
 
-def scores(report: ET.Element) -> dict[str, tuple[int, int]]:
-    """path -> (killed, total); a testcase with a failure or error child is a surviving mutant."""
-    per_file: dict[str, list[int]] = {}
-    for case in report.iter("testcase"):
-        path = case.get("file") or case.get("name", "").split(":")[0]
-        killed = case.find("failure") is None and case.find("error") is None
-        per_file.setdefault(path, [0, 0])
-        per_file[path][0] += int(killed)
-        per_file[path][1] += 1
-    return {p: (k, t) for p, (k, t) in per_file.items()}
+STATUS_CLASSES = ("killed", "timeout", "suspicious", "survived", "skipped", "untested")
+# A mutant that hangs the suite is caught, not missed: mutmut's own legend counts a timeout
+# as killed. Reading junitxml instead reports those as errors, which understates the score.
+KILLING_CLASSES = ("killed", "timeout", "suspicious")
 
 
-def survivor_ids(results_text: str) -> list[int]:
-    """`mutmut results` lists survivors as '1-3, 7, 12'; expand to ids."""
-    ids: list[int] = []
-    for line in results_text.splitlines():
-        if not line.strip() or not re.fullmatch(r"[\d,\s-]+", line.strip()):
-            continue
-        for part in line.replace(" ", "").split(","):
-            lo, _, hi = part.partition("-")
-            if lo.isdigit():
-                ids.extend(range(int(lo), int(hi or lo) + 1))
-    return ids
+def status_counts(workdir: Path) -> dict[str, int]:
+    counts = {}
+    for name in STATUS_CLASSES:
+        out = mutmut_in(workdir, "result-ids", name).stdout
+        counts[name] = len(out.split())
+    return counts
 
 
 def survivor_report(workdir: Path, limit: int) -> str:
-    results = mutmut_in(workdir, "results").stdout
-    shown = [mutmut_in(workdir, "show", str(mid)).stdout for mid in survivor_ids(results)[:limit]]
-    return "\n".join([results, *shown])
+    ids = mutmut_in(workdir, "result-ids", "survived").stdout.split()
+    return "\n".join(mutmut_in(workdir, "show", mid).stdout for mid in ids[:limit])
 
 
 class Result:
-    def __init__(self, module: str, counts: dict[str, tuple[int, int]], survivors: str,
+    def __init__(self, module: str, counts: dict[str, int], survivors: str,
                  seconds: float, log: str = ""):
         self.module = module
         self.counts = counts
@@ -89,11 +75,15 @@ class Result:
 
     @property
     def killed(self) -> int:
-        return sum(k for k, _ in self.counts.values())
+        return sum(self.counts.get(name, 0) for name in KILLING_CLASSES)
 
     @property
     def total(self) -> int:
-        return sum(t for _, t in self.counts.values())
+        return self.killed + self.counts.get("survived", 0)
+
+    def detail(self) -> str:
+        return " ".join(f"{name}={self.counts[name]}" for name in STATUS_CLASSES
+                        if self.counts.get(name))
 
     def score(self) -> float:
         return 100.0 * self.killed / self.total if self.total else 0.0
@@ -104,9 +94,10 @@ class Result:
 
     def line(self, threshold: float) -> str:
         if self.total == 0:
-            return f"{self.module:<24} {'no mutants generated — mutmut failed':<28} {self.seconds:5.0f}s  ERROR"
+            return f"{self.module:<24} {'no mutants generated — mutmut failed':<30} {self.seconds:5.0f}s  ERROR"
         verdict = "ok" if self.passed(threshold) else "BELOW THRESHOLD"
-        return f"{self.module:<24} {self.killed:>4}/{self.total:<4} {self.score():6.1f}%  {self.seconds:5.0f}s  {verdict}"
+        return (f"{self.module:<24} {self.killed:>4}/{self.total:<4} {self.score():6.1f}%  "
+                f"{self.seconds:5.0f}s  {verdict:<16} {self.detail()}")
 
 
 def measure(module: str, threshold: float, survivor_limit: int) -> Result:
@@ -118,7 +109,7 @@ def measure(module: str, threshold: float, survivor_limit: int) -> Result:
         run = mutmut_in(workdir, "run", "--paths-to-mutate", module, "--tests-dir", "tests",
                         "--runner", runner, "--no-progress",
                         "--disable-mutation-types", DISABLED_MUTATIONS)
-        counts = scores(ET.fromstring(mutmut_in(workdir, "junitxml", check=True).stdout))
+        counts = status_counts(workdir)
         elapsed = time.monotonic() - started
         result = Result(module, counts, "", elapsed, log=(run.stdout + run.stderr).strip())
         if result.total and not result.passed(threshold):

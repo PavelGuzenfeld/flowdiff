@@ -9,13 +9,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-SYMBOL_KIND_NAMES = {5: "class", 6: "method", 9: "constructor", 10: "enum",
-                     12: "function", 23: "struct"}
+# LSP SymbolKind numbers: method, constructor, function.
 FUNCTION_KINDS = frozenset({6, 9, 12})
-TRACKED_KINDS = frozenset(SYMBOL_KIND_NAMES)
+# The above plus the container kinds a flow can enter: class, enum, struct.
+TRACKED_KINDS = FUNCTION_KINDS | frozenset({5, 10, 23})
 
 
-@dataclass(frozen=True, order=True)
+@dataclass(frozen=True)
 class Position:
     line: int
     character: int

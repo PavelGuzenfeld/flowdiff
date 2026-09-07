@@ -1,3 +1,5 @@
+import dataclasses
+import json
 import os
 import sys
 import time
@@ -77,6 +79,45 @@ def test_request_timeout_raises(tmp_path: Path):
         c.close()
 
 
+def test_per_request_timeout_overrides_the_client_default(tmp_path: Path):
+    """A short per-call timeout must win over a long client default, not be ignored."""
+    c = LspClient(fake_config(), tmp_path, timeout=30)
+    try:
+        started = time.monotonic()
+        with pytest.raises(LspError, match="0.3"):
+            c.request("test/never", None, timeout=0.3)
+        assert time.monotonic() - started < 5
+    finally:
+        c.close()
+
+
+def test_a_server_that_exits_immediately_surfaces_as_an_error(tmp_path: Path):
+    dead = ServerConfig("python", sys.executable, ("-c", "pass"), frozenset({".py"}), "python")
+    with pytest.raises(LspError, match="timed out"):
+        LspClient(dead, tmp_path, timeout=0.4)
+
+
+def test_send_frames_messages_with_a_content_length_header(tmp_path: Path):
+    c = LspClient(fake_config(), tmp_path, timeout=5)
+    try:
+        written: list[bytes] = []
+
+        class Stub:
+            def write(self, data: bytes) -> None:
+                written.append(data)
+
+            def flush(self) -> None:
+                pass
+
+        c._proc.stdin = Stub()  # type: ignore[assignment]
+        c.notify("test/framing", {"a": 1})
+        payload = json.dumps({"jsonrpc": "2.0", "method": "test/framing",
+                              "params": {"a": 1}}).encode()
+        assert written == [b"Content-Length: %d\r\n\r\n" % len(payload) + payload]
+    finally:
+        c._proc.kill()
+
+
 def test_range_slice_single_and_multi_line():
     text = "abcdef\nghijkl\nmnopqr\n"
     assert Range(Position(0, 1), Position(0, 4)).slice(text) == "bcd"
@@ -127,7 +168,33 @@ def test_server_for_by_extension(tmp_path: Path, monkeypatch):
     assert lsp.server_for(Path("x.rs"), tmp_path) is None
 
 
-def test_symbol_kinds():
-    s = Symbol("f", 12, "", Range(Position(0, 0), Position(0, 1)), Range(Position(0, 0), Position(0, 1)), Path("/f.py"))
-    assert s.is_function and s.kind in lsp.TRACKED_KINDS
-    assert 5 in lsp.TRACKED_KINDS and 13 not in lsp.TRACKED_KINDS
+def test_symbol_kinds_are_the_lsp_numbers():
+    """Pinned as literals: 6 method, 9 constructor, 12 function, 5 class, 10 enum, 23 struct."""
+    assert lsp.FUNCTION_KINDS == frozenset({6, 9, 12})
+    assert lsp.TRACKED_KINDS == frozenset({5, 6, 9, 10, 12, 23})
+    assert 13 not in lsp.TRACKED_KINDS  # variable
+
+
+def test_symbol_reports_function_kinds_only():
+    r = Range(Position(0, 0), Position(0, 1))
+    assert Symbol("f", 12, "", r, r, Path("/f.py")).is_function
+    assert not Symbol("C", 5, "", r, r, Path("/f.py")).is_function
+
+
+def test_lsp_value_types_are_frozen():
+    """Symbols are dict keys and positions are compared, so these must not be mutable."""
+    r = Range(Position(0, 0), Position(0, 1))
+    frozen = [Position(1, 1), r, Symbol("f", 12, "", r, r, Path("/f.py")),
+              Location(Path("/f.py"), r),
+              ServerConfig("python", "x", (), frozenset({".py"}), "python")]
+    for value in frozen:
+        field = next(iter(vars(value)))
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            setattr(value, field, None)
+
+
+def test_slice_at_the_last_line_of_the_text():
+    """The out-of-range guard is >=, so the final line must still slice."""
+    text = "abc\ndef\n"
+    assert Range(Position(1, 0), Position(1, 3)).slice(text) == "def"
+    assert Range(Position(2, 0), Position(2, 3)).slice(text) == ""
