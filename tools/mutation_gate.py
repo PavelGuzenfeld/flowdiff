@@ -9,6 +9,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 PACKAGE = Path("flowdiff")
+MUTMUT = str(Path(sys.executable).with_name("mutmut")) if Path(sys.executable).with_name("mutmut").exists() else "mutmut"
 
 
 def touched_modules(base: str) -> list[str]:
@@ -18,9 +19,9 @@ def touched_modules(base: str) -> list[str]:
 
 
 def run_mutmut(paths: list[str]) -> ET.Element:
-    subprocess.run(["mutmut", "run", "--paths-to-mutate", ",".join(paths), "--tests-dir", "tests",
+    subprocess.run([MUTMUT, "run", "--paths-to-mutate", ",".join(paths), "--tests-dir", "tests",
                     "--runner", f"{sys.executable} -m pytest -x -q tests", "--no-progress"], check=False)
-    xml = subprocess.run(["mutmut", "junitxml"], check=True, capture_output=True, text=True).stdout
+    xml = subprocess.run([MUTMUT, "junitxml"], check=True, capture_output=True, text=True).stdout
     return ET.fromstring(xml)
 
 
@@ -50,10 +51,10 @@ def survivor_ids(results_text: str) -> list[int]:
 
 
 def show_survivors(limit: int = 60) -> None:
-    results = subprocess.run(["mutmut", "results"], capture_output=True, text=True).stdout
+    results = subprocess.run([MUTMUT, "results"], capture_output=True, text=True).stdout
     print(results)
     for mid in survivor_ids(results)[:limit]:
-        print(subprocess.run(["mutmut", "show", str(mid)], capture_output=True, text=True).stdout)
+        print(subprocess.run([MUTMUT, "show", str(mid)], capture_output=True, text=True).stdout)
 
 
 def main(argv: list[str] | None = None) -> int:
