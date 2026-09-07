@@ -6,7 +6,7 @@ graph, picks the nearest entry point whose signature is stable on both sides,
 generates the smallest harness that drives it, runs that harness against the base
 revision and the working tree, and reports what diverged and where.
 
-Designed 2026-09-06. Nothing implemented yet.
+Designed 2026-09-06. M1 (analysis and rendering) implemented 2026-09-07; the rest is tracked in issues #2 to #6.
 
 ## Goal
 
