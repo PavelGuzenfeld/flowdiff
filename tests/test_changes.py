@@ -137,6 +137,19 @@ def test_comment_spans_are_character_offsets_not_bytes():
     assert [text[a:b] for a, b in spans] == ["# c"]
 
 
+def test_scan_kinds_without_kinds_never_runs_ast_grep(monkeypatch):
+    monkeypatch.setattr(changes.subprocess, "run", lambda *a, **k: pytest.fail("ast-grep ran"))
+    assert changes.scan_kinds("python", ".py", "import os\n", ()) == []
+
+
+@pytest.mark.skipif(shutil.which("ast-grep") is None, reason="ast-grep not installed")
+def test_scan_kinds_matches_any_of_the_listed_kinds():
+    text = "import os\nfrom a import (\n    b,\n)\nx = 1\n"
+    matches = changes.scan_kinds("python", ".py", text, ("import_statement", "import_from_statement"))
+    lines = sorted((m["range"]["start"]["line"], m["range"]["end"]["line"]) for m in matches)
+    assert lines == [(0, 0), (1, 3)]
+
+
 def test_signature_text_prefers_detail_then_selection_line():
     with_detail = sym("f", 12, 0, 2, detail="(x: int) -> int")
     assert changes.signature_text(with_detail, "def f(x):\n") == "(x: int) -> int"

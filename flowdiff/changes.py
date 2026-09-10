@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from .lsp import TRACKED_KINDS, LspClient, Symbol
 
@@ -164,9 +165,18 @@ def normalized(language: str, suffix: str, text: str) -> str:
 
 
 def comment_spans(language: str, suffix: str, text: str) -> list[tuple[int, int]]:
-    if not text.strip():
+    encoded = text.encode()
+    spans = []
+    for m in scan_kinds(language, suffix, text, ("comment",)):
+        b = m["range"]["byteOffset"]
+        spans.append((len(encoded[:b["start"]].decode()), len(encoded[:b["end"]].decode())))
+    return spans
+
+
+def scan_kinds(language: str, suffix: str, text: str, kinds: tuple[str, ...]) -> list[dict[str, Any]]:
+    if not text.strip() or not kinds:
         return []
-    rule = f"id: comment\nlanguage: {language}\nrule:\n  kind: comment\n"
+    rule = f"id: kinds\nlanguage: {language}\nrule:\n  any:\n" + "".join(f"    - kind: {k}\n" for k in kinds)
     with tempfile.NamedTemporaryFile("w", suffix=suffix, delete_on_close=False) as f:
         f.write(text)
         f.close()
@@ -174,9 +184,4 @@ def comment_spans(language: str, suffix: str, text: str) -> list[tuple[int, int]
                              capture_output=True, text=True)
     if out.returncode not in (0, 1) or not out.stdout.strip():
         return []
-    encoded = text.encode()
-    spans = []
-    for m in json.loads(out.stdout):
-        b = m["range"]["byteOffset"]
-        spans.append((len(encoded[:b["start"]].decode()), len(encoded[:b["end"]].decode())))
-    return spans
+    return json.loads(out.stdout)

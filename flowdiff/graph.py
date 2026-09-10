@@ -8,11 +8,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .changes import ChangedSymbol
+from .changes import ChangedSymbol, git, scan_kinds
 from .lsp import LspClient, Position, Symbol, item_symbol
 
 HINTS_DIR = Path(__file__).parent / "hints"
 TEST_DIR_NAMES = frozenset({"test", "tests", "spec", "specs"})
+MAX_TEST_FILES_OPENED = 200
 
 
 @dataclass(frozen=True)
@@ -233,19 +234,42 @@ def frames_for(g: Graph, entry: Node, changed_ids: list[str], hops: int) -> list
     return sorted((g.nodes[n] for n in on_path), key=lambda n: (from_entry.get(n.id, 99), n.name))
 
 
+def open_test_files(client: LspClient, g: Graph) -> None:
+    if not client.config.references_need_open:
+        return
+    listed = git(client.root, "ls-files", "--cached", "--others", "--exclude-standard").splitlines()
+    tests = sorted(client.root / n for n in listed if Path(n).suffix in client.config.extensions
+                   and is_test_path(client.root / n, client.root) and (client.root / n).is_file())
+    if len(tests) > MAX_TEST_FILES_OPENED:
+        g.warnings.append(f"{len(tests)} test files; references searched in the first {MAX_TEST_FILES_OPENED}")
+    for path in tests[:MAX_TEST_FILES_OPENED]:
+        client.open(path, path.read_text(encoding="utf-8", errors="replace"))
+
+
+def import_lines(client: LspClient, path: Path, text: str) -> set[int]:
+    lines: set[int] = set()
+    for m in scan_kinds(client.config.ast_grep_language, path.suffix, text, client.config.import_kinds):
+        lines.update(range(m["range"]["start"]["line"], m["range"]["end"]["line"] + 1))
+    return lines
+
+
 def covering_tests(client: LspClient, frames: list[Node], limit: int = 40) -> list[str]:
     tests: set[str] = set()
-    symbols_cache: dict[Path, list[Symbol]] = {}
+    cache: dict[Path, tuple[list[Symbol], set[int]]] = {}
     for frame in frames[:limit]:
         if frame.status == "slot":
             continue
         for loc in client.references(frame.path, Position(frame.line, frame.col)):
             if not is_test_path(loc.path, client.root):
                 continue
-            if loc.path not in symbols_cache:
-                client.open(loc.path, loc.path.read_text(encoding="utf-8", errors="replace"))
-                symbols_cache[loc.path] = client.document_symbols(loc.path)
-            enclosing = [s for s in symbols_cache[loc.path]
+            if loc.path not in cache:
+                text = loc.path.read_text(encoding="utf-8", errors="replace")
+                client.open(loc.path, text)
+                cache[loc.path] = (client.document_symbols(loc.path), import_lines(client, loc.path, text))
+            symbols, imports = cache[loc.path]
+            if loc.range.start.line in imports:
+                continue
+            enclosing = [s for s in symbols
                          if s.is_function and s.range.overlaps_lines(loc.range.start.line, loc.range.start.line)]
             name = min(enclosing, key=lambda s: s.range.end.line - s.range.start.line).name if enclosing else "<module>"
             tests.add(f"{loc.path.relative_to(client.root)}::{name}")
@@ -265,6 +289,8 @@ def flows(client: LspClient, g: Graph, changed: list[ChangedSymbol], hops: int,
           with_tests: bool) -> list[Flow]:
     changed_ids = [c.symbol.id for c in changed]
     result = []
+    if with_tests:
+        open_test_files(client, g)
     for member in components(g, changed_ids, containment_links(changed)):
         entry = select_entry(g, member, hops)
         frames = frames_for(g, entry, member, hops) if entry else [g.nodes[m] for m in member]

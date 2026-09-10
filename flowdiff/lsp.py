@@ -84,6 +84,10 @@ class ServerConfig:
     extra_args: tuple[str, ...]
     extensions: frozenset[str]
     ast_grep_language: str
+    # pyright answers textDocument/references only for open documents; clangd has a background index.
+    references_need_open: bool = False
+    # tree-sitter node kinds whose references are imports, not uses.
+    import_kinds: tuple[str, ...] = ()
 
     @property
     def command(self) -> list[str]:
@@ -107,7 +111,9 @@ def server_for(path: Path, root: Path) -> ServerConfig | None:
         args = ("--background-index", f"--compile-commands-dir={db.parent}") if db else ("--background-index",)
         return ServerConfig("cpp", "clangd", args, CPP_EXTENSIONS, "cpp")
     if suffix in PYTHON_EXTENSIONS:
-        return ServerConfig("python", "pyright-langserver", ("--stdio",), PYTHON_EXTENSIONS, "python")
+        return ServerConfig("python", "pyright-langserver", ("--stdio",), PYTHON_EXTENSIONS, "python",
+                            references_need_open=True,
+                            import_kinds=("import_statement", "import_from_statement"))
     return None
 
 
