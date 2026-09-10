@@ -52,8 +52,6 @@ def test_delta(interpreter: Path, base: Path, root: Path, tests: list[str], time
 
 
 def run(args: argparse.Namespace) -> int:
-    harvested: dict[int, list[graph.Node]] = {}
-    clients: dict[int, lsp.LspClient] = {}
     harnesses: dict[int, harness_py.Harness] = {}
     base_holder: list[Path] = []
 
@@ -65,10 +63,7 @@ def run(args: argparse.Namespace) -> int:
             base_holder.append(worktree.base_worktree(root, args.ref or "HEAD", args.clean_base))
         graph.open_test_files(client, g)
         for flow in flows:
-            callers = [g.nodes[c] for c in g.callers(flow.entry.id)] if flow.entry else []
-            harvested[id(flow)] = callers
-            clients[id(flow)] = client
-            harnesses[id(flow)] = harness_py.build(client, root, base_holder[0], flow, callers)
+            harnesses[id(flow)] = harness_py.build(client, root, base_holder[0], flow, g)
 
     analysis = cli.analyse(args, visit)
     if isinstance(analysis, int):

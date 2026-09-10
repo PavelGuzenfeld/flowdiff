@@ -113,10 +113,59 @@ def flow_of(entry, frames, changed=None) -> graph.Flow:
     return graph.Flow(changed or [f for f in frames if f.status != "unchanged"], entry, frames, [], entry is None, [])
 
 
+def graph_of(*nodes: graph.Node, edges: list[tuple[graph.Node, graph.Node]] = []) -> graph.Graph:
+    g = graph.Graph()
+    for n in nodes:
+        g.add(n)
+    for src, dst in edges:
+        g.edges.add(graph.Edge(src.id, dst.id))
+    return g
+
+
+def no_direct_literal(tmp_path: Path) -> None:
+    (tmp_path / "tests" / "test_lib.py").write_text("from lib import entry\n\n\ndef test_it():\n    assert entry(3) == 6\n")
+
+
+def test_harvest_up_takes_the_entrys_own_site_before_looking_higher(tmp_path: Path):
+    client, scale, entry = project(tmp_path)
+    found = harness_py.harvest_up(client, tmp_path, graph_of(scale, entry, edges=[(entry, scale)]), scale)
+    assert found and found[0] is scale and found[1].args == ("4",)
+
+
+def test_harvest_up_climbs_to_the_nearest_caller_with_a_literal_call(tmp_path: Path):
+    client, scale, entry = project(tmp_path)
+    no_direct_literal(tmp_path)
+    client._references["entry"] = [Location(tmp_path / "tests" / "test_lib.py", Range(Position(4, 11), Position(4, 16)))]
+    found = harness_py.harvest_up(client, tmp_path, graph_of(scale, entry, edges=[(entry, scale)]), scale)
+    assert found and found[0] is entry and found[1].args == ("3",)
+
+
+def test_harvest_up_visits_callers_level_by_level_and_skips_slots(tmp_path: Path):
+    client, scale, entry = project(tmp_path)
+    no_direct_literal(tmp_path)
+    (tmp_path / "top.py").write_text("from lib import entry\n\n\ndef top(n):\n    return entry(n)\n\n\ntop(9)\n")
+    client.symbols["top"] = symbol("top", tmp_path / "top.py", 3, last=4)
+    top = graph.node_of(client.symbols["top"])
+    client._references["top"] = [Location(tmp_path / "top.py", Range(Position(7, 0), Position(7, 3)))]
+    client._references["entry"] = [Location(tmp_path / "top.py", Range(Position(4, 11), Position(4, 16)))]
+    slot = graph.Node("slot:x", "->x", tmp_path / "lib.py", 0, 0, "slot")
+    g = graph_of(scale, entry, top, slot, edges=[(entry, scale), (top, entry), (slot, scale)])
+    found = harness_py.harvest_up(client, tmp_path, g, scale)
+    assert found and found[0].name == "top" and found[1].args == ("9",)
+    assert tmp_path / "top.py" in client.opened and all(p.name != "->x" for p in client.opened)
+
+
+def test_harvest_up_is_none_when_no_level_has_a_literal(tmp_path: Path):
+    client, scale, entry = project(tmp_path)
+    (tmp_path / "tests" / "test_lib.py").write_text("from lib import scale\n\n\ndef test_it():\n    assert scale(n) == 8\n")
+    assert harness_py.harvest_up(client, tmp_path, graph_of(scale, entry, edges=[(entry, scale)]), scale) is None
+
+
 def test_build_writes_a_single_body_harness_over_the_flow_frames(tmp_path: Path):
     client, scale, entry = project(tmp_path)
     slot = graph.Node("slot:x", "->x", tmp_path / "lib.py", 0, 0, "slot")
-    harness = harness_py.build(client, tmp_path, tmp_path / ".flowdiff" / "base", flow_of(scale, [scale, slot]), [entry])
+    g = graph_of(scale, entry, slot, edges=[(entry, scale)])
+    harness = harness_py.build(client, tmp_path, tmp_path / ".flowdiff" / "base", flow_of(scale, [scale, slot]), g)
     assert harness.complete and harness.warnings == ()
     assert "import lib\n" in harness.source
     assert "trace(os.environ[\"FLOWDIFF_TREE\"], ['lib.py:scale'], os.environ[\"FLOWDIFF_OUT\"]):\n    lib.scale(4)\n" \
@@ -124,11 +173,21 @@ def test_build_writes_a_single_body_harness_over_the_flow_frames(tmp_path: Path)
     compile(harness.source, "harness", "exec")
 
 
+def test_build_driven_from_a_caller_keeps_the_flow_frames_and_warns(tmp_path: Path):
+    client, scale, entry = project(tmp_path)
+    no_direct_literal(tmp_path)
+    client._references["entry"] = [Location(tmp_path / "tests" / "test_lib.py", Range(Position(4, 11), Position(4, 16)))]
+    harness = harness_py.build(client, tmp_path, tmp_path, flow_of(scale, [scale]), graph_of(scale, entry, edges=[(entry, scale)]))
+    assert harness.complete
+    assert "['lib.py:scale'], os.environ[\"FLOWDIFF_OUT\"]):\n    lib.entry(3)\n" in harness.source
+    assert harness.warnings == ("scale: driven from entry, the nearest caller with a literal call site",)
+
+
 def test_build_marks_an_incomplete_harness_when_nothing_lifts(tmp_path: Path):
     client, scale, entry = project(tmp_path)
     (tmp_path / "tests" / "test_lib.py").write_text("from lib import scale\n\n\ndef test_it():\n    assert scale(n) == 8\n")
-    harness = harness_py.build(client, tmp_path, tmp_path, flow_of(scale, [scale]), [])
-    assert not harness.complete and "lib.scale(v=<v>)" in harness.source
+    harness = harness_py.build(client, tmp_path, tmp_path, flow_of(scale, [scale]), graph_of(scale))
+    assert not harness.complete and "lib.scale(v=<v>)" in harness.source and harness.warnings == ()
 
 
 def test_two_body_harvests_each_side_and_warns_when_the_arguments_differ(repo: Path, tmp_path: Path):
@@ -138,7 +197,7 @@ def test_two_body_harvests_each_side_and_warns_when_the_arguments_differ(repo: P
     (repo / "tests").mkdir()
     (repo / "tests" / "test_lib.py").write_text("from lib import scale\nscale(7)\n")
     git(repo, "add", "lib.py", "tests")
-    harness = harness_py.build(client, head, repo, flow_of(None, [scale]), [])
+    harness = harness_py.build(client, head, repo, flow_of(None, [scale]), graph.Graph())
     assert harness.complete
     assert harness.warnings == ("scale: base and head harvested different arguments; a divergence may reflect "
                                 "the inputs rather than the code",)
@@ -154,9 +213,9 @@ def test_two_body_with_matching_arguments_has_no_warning_and_is_incomplete_when_
     (repo / "tests").mkdir()
     (repo / "tests" / "test_lib.py").write_text("from lib import scale\nscale(4)\n")
     git(repo, "add", "lib.py", "tests")
-    assert harness_py.build(client, head, repo, flow_of(None, [scale]), []).warnings == ()
+    assert harness_py.build(client, head, repo, flow_of(None, [scale]), graph.Graph()).warnings == ()
     (repo / "tests" / "test_lib.py").write_text("from lib import scale\nscale(n)\n")
-    harness = harness_py.build(client, head, repo, flow_of(None, [scale]), [])
+    harness = harness_py.build(client, head, repo, flow_of(None, [scale]), graph.Graph())
     assert not harness.complete and "lib.scale(v=<v>)" in harness.source and "lib.scale(4)" in harness.source
 
 
@@ -164,6 +223,6 @@ def test_two_body_over_removed_symbols_only_is_incomplete_but_valid(repo: Path, 
     head = tmp_path / "head"
     client, scale, entry = project(head)
     removed = graph.node_of(client.symbols["scale"], "removed")
-    harness = harness_py.build(client, head, repo, flow_of(None, [removed], [removed]), [])
+    harness = harness_py.build(client, head, repo, flow_of(None, [removed], [removed]), graph.Graph())
     assert not harness.complete
     compile(harness.source, "harness", "exec")
