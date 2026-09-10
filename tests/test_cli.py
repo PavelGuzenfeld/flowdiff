@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from flowdiff import cli
+from flowdiff import changes, cli
 
 from conftest import SOURCE
 
@@ -92,8 +92,26 @@ def test_missing_language_server_is_exit_1(monkeypatch, repo: Path, capsys):
 def test_parser_defaults():
     args = cli.build_parser().parse_args([])
     assert (args.ref, args.hops, args.timeout) == (None, 3, 60.0)
-    assert args.no_tests is False and args.full is False
+    assert args.no_tests is False and args.full is False and args.list_tests is False
     assert args.repo == Path.cwd()
+
+
+def test_render_all_numbers_only_live_flows_and_collapses_removed_ones(monkeypatch, capsys, tmp_path: Path):
+    from flowdiff import graph, render
+    monkeypatch.setattr(render, "render_graph", lambda f: "GRAPH")
+    gone = graph.Node("g", "g", tmp_path / "m.py", 0, 0, "removed")
+    live = graph.Node("l", "l", tmp_path / "m.py", 5, 0, "body")
+    flows = [graph.Flow([gone], None, [gone], [], True, []),
+             graph.Flow([live], live, [live], [], False, ["tests/t.py::t"]),
+             graph.Flow([gone], None, [gone], [], True, [])]
+    analysis = cli.Analysis(tmp_path, changes.Revisions(tmp_path, "HEAD", None), flows, ["w1"])
+    cli.render_all(analysis, full=False)
+    captured = capsys.readouterr()
+    assert captured.out.startswith("flow 1/1\nGRAPH\n")
+    assert captured.out.rstrip().endswith("\n\n2 symbols removed, nothing to enter from: g-, g-")
+    assert "tests/t.py::t" not in captured.out and captured.err == "warning: w1\n"
+    cli.render_all(cli.Analysis(tmp_path, analysis.revs, flows[:1]), full=False)
+    assert capsys.readouterr().out == "1 symbols removed, nothing to enter from: g-\n"
 
 
 def test_parser_accepts_a_base_ref_and_overrides():

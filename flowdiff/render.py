@@ -79,14 +79,21 @@ def changed_by_file(flow: Flow) -> str:
     return "\n".join(f"  {p:<{width}}  {' '.join(names)}" for p, names in sorted(groups.items()))
 
 
-def render_flow(index: int, total: int, flow: Flow, full: bool = False) -> str:
+def render_flow(index: int, total: int, flow: Flow, full: bool = False, list_tests: bool = False) -> str:
     title = f"flow {index}/{total}"
     if len(flow.frames) > MAX_GRAPH_NODES and not full:
         body = f"{changed_by_file(flow)}\n  ({len(flow.frames)} frames; graph omitted above {MAX_GRAPH_NODES}, --full draws it)"
     else:
         body = render_graph(flow)
-    tests = "\n".join(f"  {t}" for t in flow.tests)
     parts = [title, body, verdict(flow)]
-    if tests:
-        parts.append(tests)
+    if list_tests and flow.tests:
+        parts.append("\n".join(f"  {t}" for t in flow.tests))
     return "\n".join(parts)
+
+
+def render_removed(flows: list[Flow]) -> str:
+    names = sorted(f"{n.name}-" for f in flows for n in f.changed)
+    shown = ", ".join(names[:MAX_NAMES_IN_VERDICT])
+    if len(names) > MAX_NAMES_IN_VERDICT:
+        shown += f" … (+{len(names) - MAX_NAMES_IN_VERDICT})"
+    return f"{len(names)} symbols removed, nothing to enter from: {shown}"

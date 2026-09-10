@@ -55,6 +55,7 @@ class Symbol:
     range: Range
     selection: Range
     path: Path
+    nested: bool = False
 
     @property
     def is_function(self) -> bool:
@@ -88,6 +89,8 @@ class ServerConfig:
     references_need_open: bool = False
     # tree-sitter node kinds whose references are imports, not uses.
     import_kinds: tuple[str, ...] = ()
+    # Only functions with this prefix count as covering tests; None keeps every reaching function.
+    test_function_prefix: str | None = None
 
     @property
     def command(self) -> list[str]:
@@ -113,7 +116,8 @@ def server_for(path: Path, root: Path) -> ServerConfig | None:
     if suffix in PYTHON_EXTENSIONS:
         return ServerConfig("python", "pyright-langserver", ("--stdio",), PYTHON_EXTENSIONS, "python",
                             references_need_open=True,
-                            import_kinds=("import_statement", "import_from_statement"))
+                            import_kinds=("import_statement", "import_from_statement"),
+                            test_function_prefix="test")
     return None
 
 
@@ -232,15 +236,15 @@ class LspClient:
             self._flatten(item, path.resolve(), symbols)
         return symbols
 
-    def _flatten(self, item: dict[str, Any], path: Path, out: list[Symbol]) -> None:
+    def _flatten(self, item: dict[str, Any], path: Path, out: list[Symbol], nested: bool = False) -> None:
         if "location" in item:
             rng = Range.from_lsp(item["location"]["range"])
-            out.append(Symbol(item["name"], item["kind"], "", rng, rng, path))
+            out.append(Symbol(item["name"], item["kind"], "", rng, rng, path, nested))
             return
         out.append(Symbol(item["name"], item["kind"], item.get("detail") or "",
-                          Range.from_lsp(item["range"]), Range.from_lsp(item["selectionRange"]), path))
+                          Range.from_lsp(item["range"]), Range.from_lsp(item["selectionRange"]), path, nested))
         for child in item.get("children") or []:
-            self._flatten(child, path, out)
+            self._flatten(child, path, out, nested or item["kind"] in FUNCTION_KINDS)
 
     def prepare_call_hierarchy(self, path: Path, pos: Position) -> list[dict[str, Any]]:
         return self.request("textDocument/prepareCallHierarchy", {
