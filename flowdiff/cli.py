@@ -15,7 +15,7 @@ REQUIRED_BINARIES = {"git": "apt install git", "ast-grep": "cargo install ast-gr
 SERVER_HINTS = {"clangd": "apt install clangd", "pyright-langserver": "npm install -g pyright"}
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="flowdiff",
         description="changed symbols → flows → rendered graph. Exit 0 rendered, 1 tool error, 2 nothing to show.")
@@ -25,7 +25,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-tests", action="store_true")
     parser.add_argument("--full", action="store_true", help="draw the graph even when it is large")
     parser.add_argument("--timeout", type=float, default=60.0, help="language server request timeout")
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
 
     missing = [f"{b}: {hint}" for b, hint in REQUIRED_BINARIES.items() if shutil.which(b) is None]
     if missing:

@@ -3,3 +3,7 @@ __pycache__/
 *.pyc
 dist/
 *.egg-info/
+.mutmut-cache
+*.bak
+.pytest_cache/
+.venv/
