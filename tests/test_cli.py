@@ -65,6 +65,16 @@ def test_clean_tree_against_a_ref_names_both_revisions(tools_present, repo: Path
     assert "HEAD" in out and "working tree" not in out
 
 
+def test_only_test_file_changes_are_exit_2(tools_present, repo: Path, capsys):
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_a.py").write_text("from a import f\n\n\ndef test_f():\n    assert f(1) == 2\n")
+    assert cli.main(["--repo", str(repo)]) == 2
+    assert "only test files changed" in capsys.readouterr().out
+    (repo / "notes.txt").write_text("x\n")
+    assert cli.main(["--repo", str(repo)]) == 2
+    assert "no changed files in a supported language" in capsys.readouterr().out
+
+
 def test_unsupported_language_is_exit_2(tools_present, repo: Path, capsys):
     (repo / "notes.txt").write_text("hello\n")
     assert cli.main(["--repo", str(repo)]) == 2

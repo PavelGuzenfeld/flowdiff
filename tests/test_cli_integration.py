@@ -78,6 +78,18 @@ def test_test_file_cap_is_reported_as_a_warning(project: Path, capsys, monkeypat
     assert "warning: 2 test files; references searched in the first 1" in capsys.readouterr().err
 
 
+def test_changed_tests_are_covering_tests_not_frames(project: Path, capsys):
+    (project / "tests").mkdir()
+    (project / "tests" / "test_lib.py").write_text("from lib import scale\n\n\ndef test_scale():\n    assert scale(1) == 3\n")
+    (project / "lib.py").write_text(BEFORE.replace("* 2", "* 3"))
+    assert cli.main(["--repo", str(project)]) == 0
+    captured = capsys.readouterr()
+    assert "entry scale  (2 frames, 1 changed: scale~)" in captured.out
+    assert "test_scale~" not in captured.out and "test_scale+" not in captured.out
+    assert "tests/test_lib.py::test_scale" in captured.out
+    assert "no caller found" not in captured.err
+
+
 def test_comment_only_change_reports_nothing_to_show(project: Path, capsys):
     (project / "lib.py").write_text(BEFORE.replace("def scale(value):", "def scale(value):  # a note"))
     assert cli.main(["--repo", str(project), "--no-tests"]) == 2

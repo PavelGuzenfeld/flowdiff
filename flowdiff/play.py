@@ -112,6 +112,7 @@ def run(args: argparse.Namespace) -> int:
         if i < len(analysis.flows):
             print()
     (out_dir / "index.json").write_text(json.dumps(index))
+    sys.stdout.flush()
     for w in analysis.warnings:
         print(f"warning: {w}", file=sys.stderr)
     return cli.EXIT_DIFF if diverged and args.fail_on_diff else cli.EXIT_OK

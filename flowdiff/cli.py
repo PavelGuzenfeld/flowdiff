@@ -92,13 +92,15 @@ def analyse(args: argparse.Namespace, visit: Visitor | None = None) -> Analysis 
         print("no changes between", revs.base, "and", "working tree" if revs.head is None else revs.head)
         return EXIT_NOTHING
 
+    # A changed test is a covering test (decision 39), never a frame: pytest is its only caller.
+    source_hunks = [h for h in hunks if not graph.is_test_path(root / h.path, root)]
     by_server: dict[lsp.ServerConfig, list[changes.Hunk]] = {}
-    for h in hunks:
+    for h in source_hunks:
         config = lsp.server_for(h.path, root)
         if config is not None:
             by_server.setdefault(config, []).append(h)
     if not by_server:
-        print("no changed files in a supported language")
+        print("only test files changed" if not source_hunks else "no changed files in a supported language")
         return EXIT_NOTHING
 
     unavailable = [f"{c.binary}: {SERVER_HINTS[c.binary]}" for c in by_server if shutil.which(c.binary) is None]
@@ -136,6 +138,7 @@ def render_all(analysis: Analysis, full: bool) -> None:
         print(render.render_flow(i, len(analysis.flows), flow, full))
         if i < len(analysis.flows):
             print()
+    sys.stdout.flush()
     for w in analysis.warnings:
         print(f"warning: {w}", file=sys.stderr)
 
