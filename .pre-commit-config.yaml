@@ -1,0 +1,13 @@
+# Install locally: pip install pre-commit && pre-commit install
+# The gate itself is the fleet pack (spec: PavelGuzenfeld/dotfiles#9), on PATH as `mutation-gate`.
+# CI keeps its own module-wide mutmut floor in tools/mutation_gate.py; this one is diff-scoped
+# and blocks the commit on any surviving mutant not waived in .mutation-gate-waivers.toml.
+repos:
+  - repo: local
+    hooks:
+      - id: mutation-gate
+        name: mutation gate (diff-scoped)
+        entry: mutation-gate --staged
+        language: system
+        files: ^flowdiff/.*\.py$
+        pass_filenames: false

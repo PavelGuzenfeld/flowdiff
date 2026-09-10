@@ -73,6 +73,17 @@ def test_render_graph_falls_back_when_layout_fails(monkeypatch):
     assert out.startswith("a") and "layout aborted" in out
 
 
+def test_render_graph_treats_a_silent_success_as_a_failed_layout(monkeypatch):
+    """graph-easy exits 0 with no output when the layouter gives up inside its timeout."""
+    monkeypatch.setattr(render.shutil, "which", lambda name: "/usr/bin/graph-easy")
+
+    class Silent:
+        returncode = 0
+        stdout = "  \n"
+    monkeypatch.setattr(render.subprocess, "run", lambda *a, **k: Silent())
+    assert render.render_graph(flow([node("a")], [])) == "a\n(graph-easy layout aborted; showing tree)"
+
+
 def test_indented_tree_stops_at_a_cycle_without_losing_the_path():
     out = render.indented_tree(flow([node("a"), node("b")], [Edge("a", "b"), Edge("b", "a")]))
     assert out.splitlines() == ["a", "  b", "    a"]
@@ -100,6 +111,9 @@ def test_verdict_truncates_long_name_lists():
     many = [node(f"n{i}", "body") for i in range(9)]
     text = render.verdict(flow(many, [], changed=many, entry=node("e")))
     assert "n5~ … (+3)" in text and "n6" not in text
+    exactly = [node(f"n{i}", "body") for i in range(6)]
+    text = render.verdict(flow(exactly, [], changed=exactly, entry=node("e")))
+    assert "n5~)" in text and "…" not in text
 
 
 def test_render_flow_compacts_large_graphs_unless_full(monkeypatch):

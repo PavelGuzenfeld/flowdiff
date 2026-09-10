@@ -1,0 +1,7 @@
+language = "python"
+source_paths = ["flowdiff"]
+test_paths = ["tests"]
+
+# The project venv, so the hook does not depend on which shell the commit comes from.
+test_command = ".venv/bin/python -m pytest -q -p no:cacheprovider {tests}"
+coverage_command = ".venv/bin/python -m pytest -q -p no:cacheprovider --cov={file} --cov-context=test --cov-report= {tests}"

@@ -11,7 +11,7 @@ requires-python = ">=3.12"
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "mutmut==2.5.1", "ast-grep-cli", "pyright"]
+dev = ["pytest>=8", "pytest-cov", "mutmut==2.5.1", "ast-grep-cli", "pyright"]
 
 [project.scripts]
 flowdiff = "flowdiff.cli:main"
