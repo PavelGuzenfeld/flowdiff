@@ -135,8 +135,20 @@ def test_render_flow_draws_a_graph_at_exactly_the_cap(monkeypatch):
 def test_render_flow_small_graph_includes_tests(monkeypatch):
     monkeypatch.setattr(render, "render_graph", lambda f: "GRAPH")
     e = node("e")
-    out = render.render_flow(2, 3, flow([e], [], changed=[node("c", "body")], entry=e, tests=["tests/t.py::t"]))
-    assert out.splitlines()[0] == "flow 2/3" and "GRAPH" in out and "  tests/t.py::t" in out
+    f = flow([e], [], changed=[node("c", "body")], entry=e, tests=["tests/t.py::t"])
+    out = render.render_flow(2, 3, f)
+    assert out.splitlines()[0] == "flow 2/3" and "GRAPH" in out
+    assert "covered by 1 test(s)" in out and "tests/t.py::t" not in out
+    assert render.render_flow(2, 3, f, list_tests=True).endswith("covered by 1 test(s)\n  tests/t.py::t")
+
+
+def test_render_removed_collapses_every_removed_symbol_into_one_line():
+    flows = [flow([node("b", "removed")], [], changed=[node("b", "removed")]),
+             flow([node("a", "removed")], [], changed=[node("a", "removed")])]
+    assert render.render_removed(flows) == "2 symbols removed, nothing to enter from: a-, b-"
+    many = [flow([], [], changed=[node(f"n{i}", "removed")]) for i in range(7)]
+    assert render.render_removed(many) == "7 symbols removed, nothing to enter from: n0-, n1-, n2-, n3-, n4-, n5- … (+1)"
+    assert render.render_removed(many[:6]).endswith("n5-")
 
 
 def test_changed_by_file_groups_and_aligns():

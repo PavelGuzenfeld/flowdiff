@@ -174,7 +174,25 @@ def test_pyright_needs_documents_open_for_references_and_clangd_does_not(tmp_pat
     cpp = lsp.server_for(Path("x.cpp"), tmp_path)
     assert py and py.references_need_open is True
     assert py.import_kinds == ("import_statement", "import_from_statement")
+    assert py.test_function_prefix == "test"
     assert cpp and cpp.references_need_open is False and cpp.import_kinds == ()
+    assert cpp.test_function_prefix is None
+
+
+def test_flatten_marks_functions_inside_functions_as_nested_but_not_methods():
+    r = {"start": {"line": 0, "character": 0}, "end": {"line": 9, "character": 0}}
+    outer = {"name": "outer", "kind": 12, "range": r, "selectionRange": r,
+             "children": [{"name": "inner", "kind": 12, "range": r, "selectionRange": r,
+                           "children": [{"name": "deeper", "kind": 12, "range": r, "selectionRange": r}]}]}
+    klass = {"name": "C", "kind": 5, "range": r, "selectionRange": r,
+             "children": [{"name": "m", "kind": 6, "range": r, "selectionRange": r,
+                           "children": [{"name": "closure", "kind": 12, "range": r, "selectionRange": r}]}]}
+    out: list[lsp.Symbol] = []
+    client = lsp.LspClient.__new__(lsp.LspClient)
+    client._flatten(outer, Path("/f.py"), out)
+    client._flatten(klass, Path("/f.py"), out)
+    assert [(s.name, s.nested) for s in out] == [("outer", False), ("inner", True), ("deeper", True),
+                                                ("C", False), ("m", False), ("closure", True)]
 
 
 def test_symbol_kinds_are_the_lsp_numbers():

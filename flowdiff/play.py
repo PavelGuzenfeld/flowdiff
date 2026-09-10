@@ -63,26 +63,27 @@ def run(args: argparse.Namespace) -> int:
             base_holder.append(worktree.base_worktree(root, args.ref or "HEAD", args.clean_base))
         graph.open_test_files(client, g)
         for flow in flows:
-            harnesses[id(flow)] = harness_py.build(client, root, base_holder[0], flow, g)
+            if not flow.removed_only:
+                harnesses[id(flow)] = harness_py.build(client, root, base_holder[0], flow, g)
 
     analysis = cli.analyse(args, visit)
     if isinstance(analysis, int):
         return analysis
     root = analysis.root
-    playable = [f for f in analysis.flows if id(f) in harnesses]
-    for flow in analysis.flows:
+    shown = [f for f in analysis.flows if not f.removed_only]
+    for flow in shown:
         if flow.language != "python":
             analysis.warnings.append(f"{flow.language} flows are analysed only; play is Python-only for now")
-    if not playable:
-        cli.render_all(analysis, args.full)
+    if not harnesses:
+        cli.render_all(analysis, args.full, args.list_tests)
         return cli.EXIT_NOTHING
 
     out_dir = run_dir(root)
     interpreter = env.python_interpreter(root)
     index: list[dict] = []
     diverged = False
-    for i, flow in enumerate(analysis.flows, 1):
-        print(render.render_flow(i, len(analysis.flows), flow, args.full))
+    for i, flow in enumerate(shown, 1):
+        print(render.render_flow(i, len(shown), flow, args.full, args.list_tests))
         if id(flow) not in harnesses:
             print()
             continue
@@ -109,9 +110,13 @@ def run(args: argparse.Namespace) -> int:
         if flow.tests:
             print("\n".join(test_delta(interpreter, base_holder[0], root, flow.tests, args.run_timeout)))
         index.append({"flow": i, "frames": frames, "base": str(traces["base"]), "head": str(traces["head"])})
-        if i < len(analysis.flows):
+        if i < len(shown):
             print()
+    removed = [f for f in analysis.flows if f.removed_only]
+    if removed:
+        print("\n" + render.render_removed(removed))
     (out_dir / "index.json").write_text(json.dumps(index))
+    sys.stdout.flush()
     for w in analysis.warnings:
         print(f"warning: {w}", file=sys.stderr)
     return cli.EXIT_DIFF if diverged and args.fail_on_diff else cli.EXIT_OK
