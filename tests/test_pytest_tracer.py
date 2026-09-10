@@ -1,9 +1,42 @@
-"""The plugin inside a real pytest process, launched the way play launches it."""
+"""The plugin's hooks in this process, and the plugin inside a real pytest process launched the way play launches it."""
+import importlib
 import subprocess
 import sys
 from pathlib import Path
 
-from flowdiff import compare, env
+import pytest
+
+from flowdiff import compare, env, pytest_tracer
+
+
+@pytest.fixture
+def released():
+    yield
+    if sys.monitoring.get_tool(sys.monitoring.PROFILER_ID) is not None:
+        sys.monitoring.set_events(sys.monitoring.PROFILER_ID, 0)
+        sys.monitoring.free_tool_id(sys.monitoring.PROFILER_ID)
+    pytest_tracer._tracer = None
+
+
+def test_session_hooks_start_then_stop_the_tracer_and_release_the_tool(tmp_path: Path, monkeypatch, released):
+    out = tmp_path / "trace.jsonl"
+    monkeypatch.setenv("FLOWDIFF_TREE", str(tmp_path))
+    monkeypatch.setenv("FLOWDIFF_FRAMES", '["lib.py:f"]')
+    monkeypatch.setenv("FLOWDIFF_OUT", str(out))
+    pytest_tracer.pytest_sessionstart(None)
+    started = pytest_tracer._tracer
+    assert started is not None and started.wanted == {"lib.py:f"} and not started.out.closed
+    assert sys.monitoring.get_tool(sys.monitoring.PROFILER_ID) == "flowdiff"
+    pytest_tracer.pytest_sessionfinish(None, 0)
+    assert started.out.closed and pytest_tracer._tracer is None
+    assert sys.monitoring.get_tool(sys.monitoring.PROFILER_ID) is None
+
+
+def test_a_fresh_plugin_has_no_tracer_and_finishing_without_a_start_does_nothing(released):
+    fresh = importlib.reload(pytest_tracer)
+    assert fresh._tracer is None
+    fresh.pytest_sessionfinish(None, 0)
+    assert fresh._tracer is None
 
 
 def project(tmp_path: Path) -> Path:
