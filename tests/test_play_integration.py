@@ -71,6 +71,19 @@ def test_play_identical_behaviour_says_so(played: Path, capsys):
     assert "identical: 2 frames traced, no value differs" in capsys.readouterr().out
 
 
+def test_play_drives_the_flow_from_a_caller_when_the_entry_has_no_literal_site(project: Path, capsys):
+    (project / "tests").mkdir()
+    (project / "tests" / "test_lib.py").write_text("from lib import entry\n\n\ndef test_entry():\n    assert entry(3) == 6\n")
+    git(project, "add", "tests")
+    git(project, "commit", "-q", "-m", "add test")
+    (project / "lib.py").write_text(BEFORE.replace("* 2", "* 3"))
+    assert cli.main(["play", "--repo", str(project), "--no-tests"]) == 0
+    captured = capsys.readouterr()
+    assert "1 of 2 frames differ; origin scale: return 6 → 9" in captured.out
+    assert "warning: scale: driven from entry, the nearest caller with a literal call site" in captured.err
+    assert "lib.entry(3)" in (project / ".flowdiff" / "run" / "flow1.py").read_text()
+
+
 def test_play_reuses_the_base_worktree_and_clean_base_rebuilds_it(played: Path, capsys):
     assert cli.main(["play", "--repo", str(played), "--no-tests"]) == 0
     base = played / ".flowdiff" / "base"

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .changes import git
-from .graph import Flow, Node, is_test_path
+from .graph import Flow, Graph, Node, is_test_path
 from .lsp import LspClient, Position
 
 HARNESS = """\
@@ -104,14 +104,33 @@ def ranked(root: Path, sites: list[tuple[Path, int]]) -> list[tuple[Path, int]]:
     return sorted(sites, key=lambda s: (not is_test_path(s[0], root), str(s[0]), s[1]))
 
 
-def harvest(client: LspClient, root: Path, entry: Node, callers: list[Node]) -> CallSite | None:
+def harvest(client: LspClient, root: Path, target: Node, callers: list[Node]) -> CallSite | None:
     for caller in callers:
         client.open(caller.path, caller.path.read_text(encoding="utf-8", errors="replace"))
-    refs = client.references(entry.path, Position(entry.line, entry.col))
+    refs = client.references(target.path, Position(target.line, target.col))
     for path, line in ranked(root, [(loc.path, loc.range.start.line) for loc in refs]):
-        site = literal_call(path.read_text(encoding="utf-8", errors="replace"), line, entry.name, path)
+        site = literal_call(path.read_text(encoding="utf-8", errors="replace"), line, target.name, path)
         if site:
             return site
+    return None
+
+
+def harvest_up(client: LspClient, root: Path, g: Graph, entry: Node) -> tuple[Node, CallSite] | None:
+    """The entry's own call sites first, then its callers level by level; the frame that yields a literal drives the flow."""
+    level, seen = [entry], {entry.id}
+    while level:
+        for node in level:
+            callers = [g.nodes[c] for c in sorted(g.callers(node.id)) if g.nodes[c].status != "slot"]
+            site = harvest(client, root, node, callers)
+            if site:
+                return node, site
+        above: list[Node] = []
+        for node in level:
+            for caller in sorted(g.callers(node.id)):
+                if caller not in seen and g.nodes[caller].status != "slot":
+                    seen.add(caller)
+                    above.append(g.nodes[caller])
+        level = above
     return None
 
 
@@ -142,13 +161,17 @@ def call_line(root: Path, node: Node, site: CallSite | None) -> tuple[str, bool]
     return f"{module}.{node.name}({slots})", False
 
 
-def build(client: LspClient, root: Path, base: Path, flow: Flow, callers: list[Node]) -> Harness:
+def build(client: LspClient, root: Path, base: Path, flow: Flow, g: Graph) -> Harness:
     frames = [frame_id(root, f) for f in flow.frames if f.status != "slot"]
-    if flow.entry is not None:
-        line, complete = call_line(root, flow.entry, harvest(client, root, flow.entry, callers))
-        imports = f"import {module_name(root, flow.entry.path)}\n"
-        return Harness(HARNESS.format(imports=imports, frames=frames, body=f"    {line}"), complete)
-    return two_body(client, root, base, flow, frames)
+    if flow.entry is None:
+        return two_body(client, root, base, flow, frames)
+    found = harvest_up(client, root, g, flow.entry)
+    driver, site = found if found else (flow.entry, None)
+    line, complete = call_line(root, driver, site)
+    imports = f"import {module_name(root, driver.path)}\n"
+    warnings = () if driver is flow.entry else \
+        (f"{flow.entry.name}: driven from {driver.name}, the nearest caller with a literal call site",)
+    return Harness(HARNESS.format(imports=imports, frames=frames, body=f"    {line}"), complete, warnings)
 
 
 def two_body(client: LspClient, root: Path, base: Path, flow: Flow, frames: list[str]) -> Harness:
