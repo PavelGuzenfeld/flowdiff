@@ -1,3 +1,4 @@
+import importlib
 import math
 from pathlib import Path
 
@@ -34,6 +35,44 @@ def test_scratch_prefix_wins_over_the_tree_it_sits_in():
 
 def test_without_a_tree_strings_are_untouched():
     assert summarise.summarise("/t/m.py") == "/t/m.py"
+
+
+def test_a_freshly_imported_module_summarises_without_any_setup():
+    fresh = importlib.reload(summarise)
+    assert fresh.summarise("/t/m.py") == "/t/m.py" and fresh.summarise(Plain())["type"].endswith("Plain")
+
+
+def test_inline_limit_boundaries_for_bytes_dicts_and_fields():
+    assert summarise.summarise(b"x" * 64) == repr(b"x" * 64)
+    assert summarise.summarise({i: i for i in range(64)}) == {str(i): i for i in range(64)}
+    wide = Plain()
+    wide.__dict__ = {f"f{i}": i for i in range(64)}
+    assert summarise.summarise(wide)["fields"] == {f"f{i}": i for i in range(64)}
+    wide.__dict__["f64"] = 64
+    assert summarise.summarise(wide) == {"type": "test_summarise.Plain"}
+
+
+def test_depth_counts_through_dicts_and_object_fields_alike():
+    nested_dict = {"a": {"a": {"a": {"a": {"a": 1}}}}}
+    assert summarise.summarise(nested_dict) == {"a": {"a": {"a": {"a": {"type": "dict"}}}}}
+    inner = Plain()
+    chain = inner
+    for _ in range(4):
+        outer = Plain()
+        outer.__dict__ = {"child": chain}
+        chain = outer
+    out = summarise.summarise(chain)
+    for _ in range(4):
+        out = out["fields"]["child"]
+    assert out == {"type": "test_summarise.Plain"}
+
+
+def test_an_object_with_only_a_shape_attribute_is_not_an_array():
+    class Shaped:
+        shape = (1,)
+
+    out = summarise.summarise(Shaped())
+    assert out["type"].endswith("Shaped") and "shape" not in out and "sha256" not in out
 
 
 def test_scalars_are_recorded_verbatim():
