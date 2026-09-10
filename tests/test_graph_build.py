@@ -8,6 +8,7 @@ from flowdiff import graph
 from flowdiff.changes import ChangedSymbol
 from flowdiff.lsp import Location, Position, Range
 
+from conftest import git
 from fake_client import FakeClient, chain_symbols, symbol
 
 
@@ -183,6 +184,75 @@ def test_covering_tests_skips_slot_frames(tmp_path: Path):
     slot = graph.Node("slot:x", "->x", tmp_path / "m.py", 0, 0, "slot")
     client = FakeClient(tmp_path, {}, {})
     assert graph.covering_tests(client, [slot]) == []
+    assert client.opened == []
+
+
+@pytest.mark.skipif(shutil.which("ast-grep") is None, reason="ast-grep not installed")
+def test_covering_tests_drops_references_on_import_lines(tmp_path: Path):
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_m.py").write_text("from m import (\n    under_test,\n)\nunder_test()\n\n\n"
+                                         "def test_it():\n    under_test()\n")
+    target = symbol("under_test", tmp_path / "m.py", 0)
+    test_fn = symbol("test_it", tests_dir / "test_m.py", 6, last=7)
+    at = lambda line, col: Location(tests_dir / "test_m.py", Range(Position(line, col), Position(line, col + 10)))
+    refs = {"under_test": [at(1, 4), at(3, 0), at(7, 4)]}
+    client = FakeClient(tmp_path, {"under_test": target, "test_it": test_fn}, {}, references=refs,
+                        import_kinds=("import_statement", "import_from_statement"))
+    assert graph.covering_tests(client, [graph.node_of(target)]) == ["tests/test_m.py::<module>",
+                                                                     "tests/test_m.py::test_it"]
+
+
+def test_open_test_files_opens_the_git_listed_test_files(repo: Path):
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_a.py").write_text("import a\n")
+    (repo / "tests" / "notes.txt").write_text("not code\n")
+    (repo / "b_test.py").write_text("import a\n")
+    (repo / "tests" / "test_gone.py").write_text("import a\n")
+    git(repo, "add", "tests", "b_test.py")
+    (repo / "tests" / "test_gone.py").unlink()
+    (repo / "tests" / "test_c.py").write_text("import a\n")
+    (repo / "tests" / "ignored_test.py").write_text("import a\n")
+    (repo / ".gitignore").write_text("ignored_test.py\n")
+    client = FakeClient(repo, {}, {}, references_need_open=True)
+    g = graph.Graph()
+    graph.open_test_files(client, g)
+    assert client.opened == [repo / "b_test.py", repo / "tests" / "test_a.py", repo / "tests" / "test_c.py"]
+    assert g.warnings == []
+
+
+def test_open_test_files_is_a_noop_for_a_server_with_a_workspace_index(repo: Path):
+    (repo / "test_a.py").write_text("import a\n")
+    client = FakeClient(repo, {}, {}, references_need_open=False)
+    graph.open_test_files(client, graph.Graph())
+    assert client.opened == []
+
+
+def test_open_test_files_caps_the_count_and_warns(repo: Path, monkeypatch):
+    (repo / "test_a.py").write_text("import a\n")
+    (repo / "test_b.py").write_text("import a\n")
+    client = FakeClient(repo, {}, {}, references_need_open=True)
+    monkeypatch.setattr(graph, "MAX_TEST_FILES_OPENED", 2)
+    g = graph.Graph()
+    graph.open_test_files(client, g)
+    assert client.opened == [repo / "test_a.py", repo / "test_b.py"] and g.warnings == []
+    client.opened.clear()
+    monkeypatch.setattr(graph, "MAX_TEST_FILES_OPENED", 1)
+    graph.open_test_files(client, g)
+    assert client.opened == [repo / "test_a.py"]
+    assert g.warnings == ["2 test files; references searched in the first 1"]
+
+
+def test_flows_opens_test_files_once_before_searching_references(repo: Path):
+    (repo / "test_a.py").write_text("import a\n")
+    syms = chain_symbols(repo, "x", "y")
+    client = FakeClient(repo, syms, {"x": ["y"]}, references_need_open=True)
+    marked = changed(syms, ("x", "body"), ("y", "body"))
+    g = graph.build_graph(client, marked, hops=3)
+    graph.flows(client, g, marked, hops=3, with_tests=True)
+    assert client.opened.count(repo / "test_a.py") == 1
+    client.opened.clear()
+    graph.flows(client, g, marked, hops=3, with_tests=False)
     assert client.opened == []
 
 

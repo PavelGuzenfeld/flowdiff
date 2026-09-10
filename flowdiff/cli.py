@@ -71,8 +71,8 @@ def main(argv: list[str] | None = None) -> int:
             if not changed:
                 continue
             g = graph.build_graph(client, changed, args.hops)
-            warnings += g.warnings
             all_flows += graph.flows(client, g, changed, args.hops, not args.no_tests)
+            warnings += g.warnings
         except lsp.LspError as err:
             print(f"language server: {err}", file=sys.stderr)
             return EXIT_TOOL_ERROR
