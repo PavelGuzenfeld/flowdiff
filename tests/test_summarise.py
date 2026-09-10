@@ -9,8 +9,31 @@ from flowdiff import summarise
 @pytest.fixture(autouse=True)
 def no_project_summariser():
     summarise._project = None
+    summarise._prefixes = []
     yield
     summarise._project = None
+    summarise._prefixes = []
+
+
+def test_strings_under_the_tree_lose_the_tree_prefix():
+    summarise.load_project_summariser("/t")
+    assert summarise.summarise("/t/pkg/m.py") == "<tree>/pkg/m.py"
+    assert summarise.summarise(["/t/pkg/m.py", "/elsewhere/m.py"]) == ["<tree>/pkg/m.py", "/elsewhere/m.py"]
+    assert summarise.summarise("/t") == "/t" and summarise.summarise("/tx/m.py") == "/tx/m.py"
+    assert summarise.summarise("/t/" + "a" * 200)["len"] == len("<tree>/") + 200
+
+
+def test_scratch_prefix_wins_over_the_tree_it_sits_in():
+    summarise.load_project_summariser("/t", "/t/.flowdiff")
+    assert summarise.summarise("/t/.flowdiff/run/basetemp/x") == "<scratch>/run/basetemp/x"
+    assert summarise.summarise("/t/lib.py") == "<tree>/lib.py"
+    summarise.load_project_summariser("/t/.flowdiff/base", "/t/.flowdiff")
+    assert summarise.summarise("/t/.flowdiff/run/basetemp/x") == "<scratch>/run/basetemp/x"
+    assert summarise.summarise("/t/.flowdiff/base/lib.py") == "<tree>/lib.py"
+
+
+def test_without_a_tree_strings_are_untouched():
+    assert summarise.summarise("/t/m.py") == "/t/m.py"
 
 
 def test_scalars_are_recorded_verbatim():

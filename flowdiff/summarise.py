@@ -15,10 +15,17 @@ INLINE_LIMIT = 64
 MAX_DEPTH = 4
 
 _project: Optional[Callable[[str, Any], Optional[dict]]] = None
+# The base worktree and the working tree differ in prefix only, so strings under either compare as
+# <tree>/...; the scratch dir holds the base tree and sits in the working tree, so the longest prefix wins.
+_prefixes: list = []
 
 
-def load_project_summariser(tree: str) -> None:
-    global _project
+def load_project_summariser(tree: str, scratch: Optional[str] = None) -> None:
+    global _project, _prefixes
+    _prefixes = [(os.path.realpath(tree), "<tree>")]
+    if scratch:
+        _prefixes.append((os.path.realpath(scratch), "<scratch>"))
+    _prefixes.sort(key=lambda p: -len(p[0]))
     path = os.path.join(tree, ".flowdiff", "summarisers.py")
     if not os.path.exists(path):
         _project = None
@@ -62,6 +69,10 @@ def summarise(value: Any, depth: int = 0) -> Any:
     if isinstance(value, float):
         return value if math.isfinite(value) else repr(value)
     if isinstance(value, str):
+        for prefix, label in _prefixes:
+            if value.startswith(prefix + os.sep):
+                value = label + value[len(prefix):]
+                break
         return value if len(value) <= INLINE_LIMIT else {"type": "str", "len": len(value),
                                                           "sha256": digest(value.encode("utf-8", "replace"))}
     if isinstance(value, (bytes, bytearray)):

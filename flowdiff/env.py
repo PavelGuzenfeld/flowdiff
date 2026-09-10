@@ -38,5 +38,6 @@ def harness_env(tree: Path, side: str = "", trace_out: Path | None = None,
         env["FLOWDIFF_TREE"] = str(tree)
         env["FLOWDIFF_SIDE"] = side
         env["FLOWDIFF_OUT"] = str(trace_out)
+        env["FLOWDIFF_SCRATCH"] = str(trace_out.parent.parent)
         env["FLOWDIFF_FRAMES"] = json.dumps(frames or [])
     return env

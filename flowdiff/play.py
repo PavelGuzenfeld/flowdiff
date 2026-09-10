@@ -58,10 +58,13 @@ def run_traced_tests(interpreter: Path, tree: Path, tests: list[str], frames: li
     ids = node_ids(tree, tests)
     if not ids:
         return f"{side}: none of the covering tests exist on this side"
+    # One basetemp for both sides: pytest wipes it per session, so tmp_path values repeat exactly.
+    basetemp = out.parent / "basetemp"
     try:
         proc = subprocess.run([str(interpreter), "-m", "pytest", "-q", "-p", "no:cacheprovider",
-                               "-p", "flowdiff.pytest_tracer", *ids], cwd=tree, capture_output=True, text=True,
-                              timeout=timeout, env=env.harness_env(tree, side, out, frames))
+                               "-p", "flowdiff.pytest_tracer", f"--basetemp={basetemp}", *ids], cwd=tree,
+                              capture_output=True, text=True, timeout=timeout,
+                              env=env.harness_env(tree, side, out, frames))
     except subprocess.TimeoutExpired:
         return f"{side}: covering tests timed out after {timeout:.0f}s"
     # 0 passed and 1 failed both traced the flow; anything else never ran it.

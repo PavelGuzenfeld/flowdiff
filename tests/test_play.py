@@ -77,7 +77,8 @@ def test_run_traced_tests_passes_the_plugin_and_accepts_failing_tests(tmp_path: 
     out = tmp_path / "h.jsonl"
     assert play.run_traced_tests(py, tmp_path, ["t.py::fail", "t.py::<module>"], ["lib.py:f"], "head", out, 10) is None
     assert compare.load(out)["lib.py:f"][0].result == 4
-    assert (tmp_path / "h.jsonl.argv").read_text() == "-m pytest -q -p no:cacheprovider -p flowdiff.pytest_tracer t.py::fail t.py"
+    assert (tmp_path / "h.jsonl.argv").read_text() == ("-m pytest -q -p no:cacheprovider -p flowdiff.pytest_tracer "
+                                                       f"--basetemp={tmp_path / 'basetemp'} t.py::fail t.py")
     assert play.run_traced_tests(py, tmp_path, ["t.py::odd"], [], "base", out, 10).startswith("base: pytest exited 4")
     assert play.run_traced_tests(py, tmp_path, ["t.py::gone"], [], "base", out, 10) \
         == "base: none of the covering tests exist on this side"
