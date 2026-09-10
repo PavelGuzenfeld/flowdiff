@@ -157,7 +157,8 @@ def run(args: argparse.Namespace) -> int:
             if failure:
                 print(failure, file=sys.stderr)
                 return cli.EXIT_TOOL_ERROR
-        report = compare.Report(frames, compare.load(traces["base"]), compare.load(traces["head"]))
+        one_sided = {harness_py.frame_id(root, f) for f in flow.frames if f.status in ("added", "removed")}
+        report = compare.Report(frames, compare.load(traces["base"]), compare.load(traces["head"]), one_sided)
         print(compare.verdict(report))
         diverged = diverged or bool(report.differing())
         for frame in report.traced()[:args.depth]:

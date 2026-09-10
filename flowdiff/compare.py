@@ -80,6 +80,8 @@ class Report:
     frames: list[str]
     base: dict[str, list[Call]]
     head: dict[str, list[Call]]
+    # Added and removed frames: calls on one side only are what the marker already says, not a divergence.
+    one_sided: set[str] = field(default_factory=set)
 
     def divergences(self, frame: str) -> list[Divergence]:
         """Timed by the head trace where the call exists there, so the origin is the first value that differed."""
@@ -87,6 +89,8 @@ class Report:
         out = []
         for i in range(max(len(base), len(head))):
             if i >= len(base) or i >= len(head):
+                if frame in self.one_sided:
+                    continue
                 present = head[i] if i < len(head) else base[i]
                 out.append(Divergence(frame, i, "call", MISSING if i >= len(base) else base[i].values(),
                                       MISSING if i >= len(head) else head[i].values(), present.seq))

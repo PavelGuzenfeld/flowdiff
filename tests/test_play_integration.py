@@ -89,6 +89,17 @@ def test_play_falls_back_to_the_covering_tests_when_nothing_lifts(project: Path,
     assert "no covering test present on both sides; fill the slots" in capsys.readouterr().out
 
 
+def test_an_extracted_helper_is_a_new_frame_not_a_divergence(played: Path, capsys):
+    (played / "lib.py").write_text(BEFORE.replace("def scale(value):\n    return clamp(value, 100) * 2",
+                                                  "def double(v):\n    return v * 2\n\n\n"
+                                                  "def scale(value):\n    return double(clamp(value, 100))"))
+    assert cli.main(["play", "--repo", str(played), "--no-tests"]) == 0
+    out = capsys.readouterr().out
+    assert "double+" in out and "identical: 3 frames traced, no value differs" in out
+    assert cli.main(["show", "double", "--repo", str(played)]) == 0
+    assert capsys.readouterr().out.startswith("lib.py:double  base 0 call(s), head 1 call(s)")
+
+
 def test_play_identical_behaviour_says_so(played: Path, capsys):
     (played / "lib.py").write_text(BEFORE.replace("clamp(value, 100) * 2", "2 * clamp(value, 100)"))
     assert cli.main(["play", "--repo", str(played), "--no-tests", "--fail-on-diff"]) == 0

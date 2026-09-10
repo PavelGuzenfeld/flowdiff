@@ -74,6 +74,20 @@ def test_a_call_present_on_one_side_only_is_a_divergence_in_its_own_right():
     assert reverse[0].describe() == "call #2 only on base" and reverse[0].at == 3
 
 
+def test_added_and_removed_frames_do_not_diverge_by_existing_on_one_side_only():
+    base = {"f": [compare.Call(1, {"x": 1}, 4, end=6)], "old": [compare.Call(2, {}, 0, end=3)]}
+    head = {"f": [compare.Call(1, {"x": 1}, 9, end=6)], "new": [compare.Call(2, {}, 0, end=3)],
+            "new": [compare.Call(2, {}, 0, end=3), compare.Call(4, {}, 1, end=5)]}
+    r = compare.Report(["f", "new", "old"], base, head, one_sided={"new", "old"})
+    assert r.divergences("new") == [] and r.divergences("old") == []
+    assert r.differing() == ["f"] and r.traced() == ["f", "new", "old"]
+    assert compare.verdict(r) == "1 of 3 frames differ; origin f: return 4 → 9"
+    plain = compare.Report(["f", "new", "old"], base, head)
+    assert plain.differing() == ["f", "new", "old"]
+    assert compare.verdict(compare.Report(["new"], {}, {"new": head["new"]}, {"new"})) \
+        == "identical: 1 frames traced, no value differs"
+
+
 def test_traced_keeps_flow_order_and_drops_frames_neither_side_reached():
     r = report({"g": [compare.Call(1)]}, {}, frames=("f", "g", "h"))
     assert r.traced() == ["g"] and r.differing() == ["g"]
