@@ -63,12 +63,13 @@ def test_no_project_environment_means_the_running_interpreter(tmp_path: Path, mo
 
 def test_harness_env_points_pythonpath_at_the_tree_first(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("PYTHONPATH", "/elsewhere")
-    e = env.harness_env(tmp_path, "base", tmp_path / "out.jsonl")
-    assert e["PYTHONPATH"] == f"{tmp_path}{os.pathsep}/elsewhere"
+    e = env.harness_env(tmp_path, "base", tmp_path / "out.jsonl", ["lib.py:f"])
+    assert e["PYTHONPATH"] == f"{tmp_path}{os.pathsep}{env.TOOL_ROOT}{os.pathsep}/elsewhere"
     assert e["PYTHONHASHSEED"] == "0" and e["PYTHONDONTWRITEBYTECODE"] == "1"
     assert e["FLOWDIFF_TREE"] == str(tmp_path) and e["FLOWDIFF_SIDE"] == "base"
-    assert e["FLOWDIFF_OUT"] == str(tmp_path / "out.jsonl")
+    assert e["FLOWDIFF_OUT"] == str(tmp_path / "out.jsonl") and e["FLOWDIFF_FRAMES"] == '["lib.py:f"]'
     assert Path(e["FLOWDIFF_TOOL"]) == env.TOOL_ROOT and (env.TOOL_ROOT / "flowdiff" / "trace_py.py").exists()
+    assert env.harness_env(tmp_path, "base", tmp_path / "out.jsonl")["FLOWDIFF_FRAMES"] == "[]"
 
 
 def test_harness_env_without_a_trace_sets_no_flowdiff_variables(tmp_path: Path, monkeypatch):

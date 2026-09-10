@@ -11,10 +11,13 @@ import os, sys, time
 target = sys.argv[-1]
 if "sleep" in target:
     time.sleep(5)
-if target.endswith(".py"):
+if "FLOWDIFF_OUT" in os.environ:
     with open(os.environ["FLOWDIFF_OUT"], "w") as f:
         f.write('{"seq": 1, "event": "enter", "frame": "lib.py:f", "args": {"x": 1}}\\n')
         f.write('{"seq": 2, "event": "exit", "frame": "lib.py:f", "return": %s}\\n' % os.environ["FLOWDIFF_SIDE"].__len__())
+    with open(os.environ["FLOWDIFF_OUT"] + ".argv", "w") as f:
+        f.write(" ".join(sys.argv[1:]))
+if target.endswith(".py"):
     sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
 sys.stderr.write("boom\\n")
 sys.exit({"pass": 0, "fail": 1}.get(target.split("::")[-1], 4))
@@ -28,14 +31,43 @@ def fake_interpreter(tmp_path: Path) -> Path:
     return path
 
 
+def with_tests(tmp_path: Path, *names: str) -> Path:
+    (tmp_path / "t.py").write_text("".join(f"def {n}():\n    pass\n\n\n" for n in names))
+    return tmp_path
+
+
 def test_run_tests_maps_pytest_exit_codes(tmp_path: Path):
-    py = fake_interpreter(tmp_path)
-    tests = ["t.py::pass", "t.py::fail", "t.py::odd"]
-    assert play.run_tests(py, tmp_path, tests, 10) == {"t.py::pass": "PASS", "t.py::fail": "FAIL", "t.py::odd": "ERROR(4)"}
+    py = fake_interpreter(with_tests(tmp_path, "pass", "fail", "odd"))
+    tests = ["t.py::pass", "t.py::fail", "t.py::odd", "t.py::gone", "u.py::pass"]
+    assert play.run_tests(py, tmp_path, tests, 10) == {"t.py::pass": "PASS", "t.py::fail": "FAIL",
+                                                      "t.py::odd": "ERROR(4)", "t.py::gone": "ABSENT",
+                                                      "u.py::pass": "ABSENT"}
 
 
 def test_run_tests_reports_a_timeout(tmp_path: Path):
-    assert play.run_tests(fake_interpreter(tmp_path), tmp_path, ["t.py::sleep"], 0.3) == {"t.py::sleep": "TIMEOUT"}
+    py = fake_interpreter(with_tests(tmp_path, "sleep"))
+    assert play.run_tests(py, tmp_path, ["t.py::sleep"], 0.3) == {"t.py::sleep": "TIMEOUT"}
+
+
+def test_present_needs_the_file_and_the_def_unless_module_level(tmp_path: Path):
+    with_tests(tmp_path, "test_a")
+    assert play.present(tmp_path, "t.py::test_a") and play.present(tmp_path, "t.py::<module>")
+    assert play.present(tmp_path, "t.py") and not play.present(tmp_path, "t.py::test_b")
+    assert not play.present(tmp_path, "missing.py::<module>")
+    assert play.node_ids(tmp_path, ["t.py::<module>", "t.py::test_a", "t.py::test_b"]) == ["t.py", "t.py::test_a"]
+
+
+def test_run_traced_tests_passes_the_plugin_and_accepts_failing_tests(tmp_path: Path):
+    py = fake_interpreter(with_tests(tmp_path, "pass", "fail", "odd", "sleep"))
+    out = tmp_path / "h.jsonl"
+    assert play.run_traced_tests(py, tmp_path, ["t.py::fail", "t.py::<module>"], ["lib.py:f"], "head", out, 10) is None
+    assert compare.load(out)["lib.py:f"][0].result == 4
+    assert (tmp_path / "h.jsonl.argv").read_text() == "-m pytest -q -p no:cacheprovider -p flowdiff.pytest_tracer t.py::fail t.py"
+    assert play.run_traced_tests(py, tmp_path, ["t.py::odd"], [], "base", out, 10).startswith("base: pytest exited 4")
+    assert play.run_traced_tests(py, tmp_path, ["t.py::gone"], [], "base", out, 10) \
+        == "base: none of the covering tests exist on this side"
+    assert play.run_traced_tests(py, tmp_path, ["t.py::sleep"], [], "base", out, 0.3) \
+        == "base: covering tests timed out after 0s"
 
 
 def test_test_delta_prints_before_and_after_per_test(tmp_path: Path, monkeypatch):

@@ -4,6 +4,7 @@ __pycache__/
 dist/
 *.egg-info/
 .mutmut-cache
+.coverage
 *.bak
 .pytest_cache/
 .venv/

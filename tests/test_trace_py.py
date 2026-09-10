@@ -22,6 +22,17 @@ def h(x):
 
 def untraced():
     return f(1)
+
+
+def boom():
+    raise KeyError("outside the flow")
+
+
+def catcher():
+    try:
+        boom()
+    except KeyError:
+        return g(5)
 """
 
 
@@ -75,6 +86,12 @@ def test_an_exception_leaves_a_raises_record(tmp_path: Path, lib, backend):
     recs = run(tmp_path, lib, ["lib.py:h"], action)
     assert recs == [{"seq": 1, "event": "enter", "frame": "lib.py:h", "args": {"x": "bad"}},
                     {"seq": 2, "event": "exit", "frame": "lib.py:h", "raises": "ValueError"}]
+
+
+def test_an_exception_outside_the_flow_neither_records_nor_breaks_the_trace(tmp_path: Path, lib, backend):
+    recs = run(tmp_path, lib, ["lib.py:g"], lambda m: m.catcher())
+    assert [(r["event"], r["frame"]) for r in recs] == [("enter", "lib.py:g"), ("exit", "lib.py:g")]
+    assert recs[1]["return"] == 10
 
 
 def test_varargs_and_keywords_are_named_with_their_stars(tmp_path: Path, lib, backend):

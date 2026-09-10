@@ -65,6 +65,22 @@ def test_play_without_a_literal_call_site_stops_with_the_slot_path(project: Path
     assert not (project / ".flowdiff" / "run" / "index.json").exists()
 
 
+def test_play_falls_back_to_the_covering_tests_when_nothing_lifts(project: Path, capsys):
+    (project / "tests").mkdir()
+    (project / "tests" / "test_lib.py").write_text(
+        "from lib import scale\n\nFOUR = 4\n\n\ndef test_scale():\n    assert scale(FOUR) == 8\n")
+    git(project, "add", "tests")
+    git(project, "commit", "-q", "-m", "add test")
+    (project / "lib.py").write_text(BEFORE.replace("* 2", "* 3"))
+    assert cli.main(["play", "--repo", str(project)]) == 0
+    out = capsys.readouterr().out
+    assert "no call site with literal arguments; driven by 1 covering test(s)" in out
+    assert "1 of 2 frames differ; origin scale: return 8 → 12" in out
+    assert "tests/test_lib.py::test_scale  PASS→FAIL" in out
+    assert cli.main(["play", "--repo", str(project), "--no-tests"]) == 2
+    assert "no covering test; fill the slots" in capsys.readouterr().out
+
+
 def test_play_identical_behaviour_says_so(played: Path, capsys):
     (played / "lib.py").write_text(BEFORE.replace("clamp(value, 100) * 2", "2 * clamp(value, 100)"))
     assert cli.main(["play", "--repo", str(played), "--no-tests", "--fail-on-diff"]) == 0
