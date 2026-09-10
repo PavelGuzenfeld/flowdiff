@@ -65,6 +65,11 @@ class Flow:
     edges: list[Edge]
     two_body: bool
     tests: list[str]
+    language: str = ""
+
+    @property
+    def removed_only(self) -> bool:
+        return all(n.status == "removed" for n in self.changed)
 
 
 def node_of(sym: Symbol, status: str = "unchanged") -> Node:
@@ -111,7 +116,7 @@ def build_graph(client: LspClient, changed: list[ChangedSymbol], hops: int) -> G
 
     add_hint_edges(client, g)
     for c in changed:
-        if c.symbol.is_function and c.status != "removed" and not g.callers(c.symbol.id):
+        if c.symbol.is_function and not c.symbol.nested and c.status != "removed" and not g.callers(c.symbol.id):
             g.warnings.append(f"{c.symbol.name}: no caller found — add a hint rule?")
     return g
 
@@ -272,6 +277,9 @@ def covering_tests(client: LspClient, frames: list[Node], limit: int = 40) -> li
             enclosing = [s for s in symbols
                          if s.is_function and s.range.overlaps_lines(loc.range.start.line, loc.range.start.line)]
             name = min(enclosing, key=lambda s: s.range.end.line - s.range.start.line).name if enclosing else "<module>"
+            prefix = client.config.test_function_prefix
+            if prefix and name != "<module>" and not name.startswith(prefix):
+                continue
             tests.add(f"{loc.path.relative_to(client.root)}::{name}")
     return sorted(tests)
 
@@ -298,5 +306,6 @@ def flows(client: LspClient, g: Graph, changed: list[ChangedSymbol], hops: int,
         edges = sorted((e for e in g.edges if e.src in frame_ids and e.dst in frame_ids),
                        key=lambda e: (e.src, e.dst))
         tests = covering_tests(client, frames) if with_tests else []
-        result.append(Flow([g.nodes[m] for m in member], entry, frames, edges, entry is None, tests))
+        result.append(Flow([g.nodes[m] for m in member], entry, frames, edges, entry is None, tests,
+                           client.config.language_id))
     return result

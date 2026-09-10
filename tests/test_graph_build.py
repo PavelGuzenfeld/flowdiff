@@ -101,9 +101,11 @@ def test_build_graph_warns_only_for_uncalled_functions(tmp_path: Path):
     syms = chain_symbols(tmp_path, "orphan", "called", "caller")
     klass = symbol("Klass", tmp_path / "m.py", 40, kind=5)
     syms["Klass"] = klass
+    closure = symbol("closure", tmp_path / "m.py", 50)
+    syms["closure"] = closure.__class__(**{**closure.__dict__, "nested": True})
     client = FakeClient(tmp_path, syms, {"caller": ["called"]})
     g = graph.build_graph(client, changed(syms, ("orphan", "body"), ("called", "body"),
-                                          ("Klass", "body")), hops=3)
+                                          ("Klass", "body"), ("closure", "body")), hops=3)
     assert g.warnings == ["orphan: no caller found — add a hint rule?"]
 
 
@@ -178,6 +180,26 @@ def test_covering_tests_falls_back_to_module_scope(tmp_path: Path):
                         references={"under_test": [Location(tests_dir / "test_m.py",
                                                             Range(Position(2, 0), Position(2, 4)))]})
     assert graph.covering_tests(client, [graph.node_of(target)]) == ["tests/test_m.py::<module>"]
+
+
+def test_covering_tests_keep_only_prefixed_functions_when_the_server_names_a_prefix(tmp_path: Path):
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_m.py").write_text("under_test()\n" + "\n" * 5 + "def fixture():\n    under_test()\n"
+                                        + "\n\ndef test_it():\n    under_test()\n")
+    target = symbol("under_test", tmp_path / "m.py", 0)
+    fixture = symbol("fixture", tests_dir / "test_m.py", 6, last=7)
+    test_fn = symbol("test_it", tests_dir / "test_m.py", 10, last=11)
+    at = lambda line: Location(tests_dir / "test_m.py", Range(Position(line, 4), Position(line, 14)))
+    refs = {"under_test": [at(0), at(7), at(11)]}
+    syms = {"under_test": target, "fixture": fixture, "test_it": test_fn}
+    with_prefix = FakeClient(tmp_path, syms, {}, references=refs, test_function_prefix="test")
+    assert graph.covering_tests(with_prefix, [graph.node_of(target)]) == ["tests/test_m.py::<module>",
+                                                                          "tests/test_m.py::test_it"]
+    without = FakeClient(tmp_path, syms, {}, references=refs)
+    assert graph.covering_tests(without, [graph.node_of(target)]) == ["tests/test_m.py::<module>",
+                                                                      "tests/test_m.py::fixture",
+                                                                      "tests/test_m.py::test_it"]
 
 
 def test_covering_tests_skips_slot_frames(tmp_path: Path):
