@@ -57,6 +57,21 @@ def test_present_needs_the_file_and_the_def_unless_module_level(tmp_path: Path):
     assert play.node_ids(tmp_path, ["t.py::<module>", "t.py::test_a", "t.py::test_b"]) == ["t.py", "t.py::test_a"]
 
 
+def test_shared_tests_keeps_both_sided_tests_and_names_changed_files(tmp_path: Path):
+    base, root = tmp_path / "base", tmp_path / "root"
+    for tree in (base, root):
+        (tree / "tests").mkdir(parents=True)
+        (tree / "tests" / "test_same.py").write_text("def test_a():\n    pass\n")
+    (base / "tests" / "test_edited.py").write_text("def test_b():\n    pass\n")
+    (root / "tests" / "test_edited.py").write_text("def test_b():\n    assert 1\n")
+    (root / "tests" / "test_new.py").write_text("def test_c():\n    pass\n")
+    tests = ["tests/test_same.py::test_a", "tests/test_edited.py::test_b", "tests/test_new.py::test_c",
+             "tests/test_same.py::test_gone"]
+    shared, changed = play.shared_tests(base, root, tests)
+    assert shared == ["tests/test_same.py::test_a", "tests/test_edited.py::test_b"]
+    assert changed == ["tests/test_edited.py"]
+
+
 def test_run_traced_tests_passes_the_plugin_and_accepts_failing_tests(tmp_path: Path):
     py = fake_interpreter(with_tests(tmp_path, "pass", "fail", "odd", "sleep"))
     out = tmp_path / "h.jsonl"

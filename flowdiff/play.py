@@ -40,6 +40,14 @@ def present(tree: Path, test: str) -> bool:
     return name in ("", "<module>") or f"def {name}(" in path.read_text(encoding="utf-8", errors="replace")
 
 
+def shared_tests(base: Path, root: Path, tests: list[str]) -> tuple[list[str], list[str]]:
+    """Tests present on both sides, and the test files among them whose text differs between the sides."""
+    shared = [t for t in tests if present(base, t) and present(root, t)]
+    files = sorted({t.split("::")[0] for t in shared})
+    changed = [f for f in files if (base / f).read_bytes() != (root / f).read_bytes()]
+    return shared, changed
+
+
 def node_ids(tree: Path, tests: list[str]) -> list[str]:
     return [t.split("::")[0] if t.endswith("::<module>") else t for t in tests if present(tree, t)]
 
@@ -127,17 +135,21 @@ def run(args: argparse.Namespace) -> int:
         analysis.warnings += harness.warnings
         frames = [harness_py.frame_id(root, f) for f in flow.frames if f.status != "slot"]
         traces = {side: out_dir / f"flow{i}.{side}.jsonl" for side in ("base", "head")}
+        shared, changed_tests = shared_tests(base_holder[0], root, flow.tests) if flow.tests else ([], [])
         if harness.complete:
             def drive(side: str, tree: Path) -> str | None:
                 return run_harness(interpreter, harness_path, tree, side, traces[side], args.run_timeout)
-        elif flow.tests:
-            print(f"no call site with literal arguments; driven by {len(flow.tests)} covering test(s)")
+        elif shared:
+            print(f"no call site with literal arguments; driven by {len(shared)} covering test(s) present on both sides")
+            if changed_tests:
+                analysis.warnings.append(f"the driving tests changed in this diff ({', '.join(changed_tests)}); "
+                                         "a divergence may reflect the inputs rather than the code")
 
             def drive(side: str, tree: Path) -> str | None:
-                return run_traced_tests(interpreter, tree, flow.tests, frames, side, traces[side], args.run_timeout)
+                return run_traced_tests(interpreter, tree, shared, frames, side, traces[side], args.run_timeout)
         else:
-            print(f"no call site with literal arguments and no covering test; fill the slots in {harness_path} "
-                  "— harness not run")
+            print("no call site with literal arguments and no covering test present on both sides; "
+                  f"fill the slots in {harness_path} — harness not run")
             cli.render_all(cli.Analysis(root, analysis.revs, [], analysis.warnings), args.full)
             return cli.EXIT_NOTHING
         for side, tree in (("base", base_holder[0]), ("head", root)):

@@ -7,6 +7,12 @@ from pathlib import Path
 from typing import Any
 
 MISSING = object()
+BRIEF_LIMIT = 60
+
+
+def brief(value: Any) -> str:
+    text = json.dumps(value)
+    return text if len(text) <= BRIEF_LIMIT else text[:BRIEF_LIMIT - 1] + "…"
 
 
 @dataclass
@@ -66,7 +72,7 @@ class Divergence:
             return f"call #{self.index + 1} only on head"
         if self.head is MISSING:
             return f"call #{self.index + 1} only on base"
-        return f"{self.field} {json.dumps(self.base)} → {json.dumps(self.head)}"
+        return f"{self.field} {brief(self.base)} → {brief(self.head)}"
 
 
 @dataclass
@@ -124,6 +130,8 @@ def resolve(report: Report, query: str) -> list[str]:
 
 
 def show(report: Report, frame: str, arg: str | None = None) -> str:
+    """Values are cut to BRIEF_LIMIT unless one argument is asked for by name; that one is printed whole."""
+    render = json.dumps if arg is not None else brief
     base, head = report.base.get(frame, []), report.head.get(frame, [])
     lines = [f"{frame}  base {len(base)} call(s), head {len(head)} call(s)"]
     for i in range(max(len(base), len(head))):
@@ -134,8 +142,8 @@ def show(report: Report, frame: str, arg: str | None = None) -> str:
         if arg is not None:
             keys = [k for k in keys if k == arg]
         for k in keys:
-            bv = json.dumps(b[k]) if k in b else "—"
-            hv = json.dumps(h[k]) if k in h else "—"
+            bv = render(b[k]) if k in b else "—"
+            hv = render(h[k]) if k in h else "—"
             mark = "" if bv == hv else "  *"
             lines.append(f"  #{i + 1:<3} {k:<14} {bv:<28} {hv}{mark}")
     return "\n".join(lines)

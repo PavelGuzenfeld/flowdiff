@@ -112,6 +112,27 @@ def test_show_can_narrow_to_one_argument_and_keeps_head_only_arguments():
     assert compare.show(report(base, head), "f", "z").splitlines()[1].split() == ["#1", "z", "—", "0", "*"]
 
 
+def test_brief_cuts_at_sixty_characters_inclusive():
+    assert compare.BRIEF_LIMIT == 60
+    exact = "x" * 58
+    assert compare.brief(exact) == json.dumps(exact) and len(json.dumps(exact)) == 60
+    cut = compare.brief("x" * 59)
+    assert len(cut) == 60 and cut.endswith("…") and cut.startswith('"xxx')
+
+
+def test_describe_and_show_use_brief_values_but_a_named_argument_is_whole():
+    big = {"type": "Thing", "fields": {str(i): i for i in range(30)}}
+    base = {"f": [compare.Call(1, {"obj": big}, 1, end=2)]}
+    head = {"f": [compare.Call(1, {"obj": 0}, 1, end=2)]}
+    d = report(base, head).divergences("f")[0]
+    assert d.describe().startswith("obj {\"type\": \"Thing\"") and d.describe().endswith("… → 0")
+    assert len(d.describe()) < 80
+    table = compare.show(report(base, head), "f")
+    assert "…" in table and json.dumps(big) not in table
+    whole = compare.show(report(base, head), "f", "obj")
+    assert json.dumps(big) in whole
+
+
 def test_resolve_accepts_the_short_name_or_the_full_frame():
     r = report({}, {}, frames=("lib.py:f", "pkg/m.py:f", "lib.py:g"))
     assert compare.resolve(r, "f") == ["lib.py:f", "pkg/m.py:f"]
