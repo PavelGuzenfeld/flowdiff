@@ -17,12 +17,14 @@ class FakeClient:
     def __init__(self, root: Path, symbols: dict[str, Symbol],
                  calls: dict[str, list[str]] | None = None,
                  references: dict[str, list[Location]] | None = None,
-                 language: str = "python"):
+                 language: str = "python", references_need_open: bool = False,
+                 import_kinds: tuple[str, ...] = ()):
         self.root = root
         self.symbols = symbols
         self.calls = calls or {}
         self._references = references or {}
-        self.config = ServerConfig(language, "fake", (), frozenset({".py"}), language)
+        self.config = ServerConfig(language, "fake", (), frozenset({".py"}), language,
+                                   references_need_open, import_kinds)
         self.opened: list[Path] = []
         self.prepared: list[str] = []
 

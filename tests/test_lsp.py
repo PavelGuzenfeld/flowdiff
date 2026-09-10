@@ -168,6 +168,15 @@ def test_server_for_by_extension(tmp_path: Path, monkeypatch):
     assert lsp.server_for(Path("x.rs"), tmp_path) is None
 
 
+def test_pyright_needs_documents_open_for_references_and_clangd_does_not(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(lsp, "find_compile_db", lambda root: None)
+    py = lsp.server_for(Path("x.py"), tmp_path)
+    cpp = lsp.server_for(Path("x.cpp"), tmp_path)
+    assert py and py.references_need_open is True
+    assert py.import_kinds == ("import_statement", "import_from_statement")
+    assert cpp and cpp.references_need_open is False and cpp.import_kinds == ()
+
+
 def test_symbol_kinds_are_the_lsp_numbers():
     """Pinned as literals: 6 method, 9 constructor, 12 function, 5 class, 10 enum, 23 struct."""
     assert lsp.FUNCTION_KINDS == frozenset({6, 9, 12})

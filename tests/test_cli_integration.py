@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from flowdiff import cli
+from flowdiff import cli, graph
 
 from conftest import git
 
@@ -56,9 +56,6 @@ def test_signature_change_enters_from_the_stable_caller(project: Path, capsys):
     assert "entry scale" in out
 
 
-@pytest.mark.xfail(reason="pyright reports references only for files it has open; flowdiff "
-                          "never opens the test files, so cross-file discovery misses them",
-                   strict=True)
 def test_covering_tests_are_reported_when_a_test_reaches_the_flow(project: Path, capsys):
     tests_dir = project / "tests"
     tests_dir.mkdir()
@@ -70,6 +67,15 @@ def test_covering_tests_are_reported_when_a_test_reaches_the_flow(project: Path,
     out = capsys.readouterr().out
     assert "tests/test_lib.py::test_scale" in out
     assert "covered by 1 test(s)" in out
+
+
+def test_test_file_cap_is_reported_as_a_warning(project: Path, capsys, monkeypatch):
+    monkeypatch.setattr(graph, "MAX_TEST_FILES_OPENED", 1)
+    (project / "test_one.py").write_text("from lib import scale\n")
+    (project / "test_two.py").write_text("from lib import scale\n")
+    (project / "lib.py").write_text(BEFORE.replace("* 2", "* 3"))
+    assert cli.main(["--repo", str(project)]) == 0
+    assert "warning: 2 test files; references searched in the first 1" in capsys.readouterr().err
 
 
 def test_comment_only_change_reports_nothing_to_show(project: Path, capsys):
