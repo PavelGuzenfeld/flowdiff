@@ -1,6 +1,7 @@
 """The project's own interpreter and the environment a Python harness runs in (decision 46)."""
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -22,10 +23,13 @@ def python_interpreter(root: Path) -> Path:
     return Path(sys.executable)
 
 
-def harness_env(tree: Path, side: str = "", trace_out: Path | None = None) -> dict[str, str]:
+def harness_env(tree: Path, side: str = "", trace_out: Path | None = None,
+                frames: list[str] | None = None) -> dict[str, str]:
     env = dict(os.environ)
-    existing = env.get("PYTHONPATH")
-    env["PYTHONPATH"] = str(tree) + (os.pathsep + existing if existing else "")
+    path = [str(tree)] + ([str(TOOL_ROOT)] if trace_out is not None else [])
+    if env.get("PYTHONPATH"):
+        path.append(env["PYTHONPATH"])
+    env["PYTHONPATH"] = os.pathsep.join(path)
     # The two runs must not differ in set/dict iteration order alone.
     env["PYTHONHASHSEED"] = "0"
     env["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -34,4 +38,5 @@ def harness_env(tree: Path, side: str = "", trace_out: Path | None = None) -> di
         env["FLOWDIFF_TREE"] = str(tree)
         env["FLOWDIFF_SIDE"] = side
         env["FLOWDIFF_OUT"] = str(trace_out)
+        env["FLOWDIFF_FRAMES"] = json.dumps(frames or [])
     return env

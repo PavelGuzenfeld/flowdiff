@@ -91,11 +91,11 @@ class Tracer:
             return sys.monitoring.DISABLE
         self.on_return(key, value)
 
-    def _py_unwind(self, code: Any, offset: int, exc: BaseException) -> Any:
+    def _py_unwind(self, code: Any, offset: int, exc: BaseException) -> None:
+        # PY_UNWIND is not a local event: returning DISABLE here is a ValueError, unlike PY_START/PY_RETURN.
         key = self.key_of(code)
-        if key is None:
-            return sys.monitoring.DISABLE
-        self.on_raise(key, exc)
+        if key is not None:
+            self.on_raise(key, exc)
 
     def _settrace(self, frame: Any, event: str, arg: Any) -> Any:
         if event != "call":

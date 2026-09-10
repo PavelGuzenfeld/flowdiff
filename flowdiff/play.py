@@ -31,9 +31,43 @@ def run_harness(interpreter: Path, harness: Path, tree: Path, side: str, out: Pa
     return None
 
 
+def present(tree: Path, test: str) -> bool:
+    """A test id exists on a side when its file is there and, unless module-level, so is its def."""
+    file, _, name = test.partition("::")
+    path = tree / file
+    if not path.is_file():
+        return False
+    return name in ("", "<module>") or f"def {name}(" in path.read_text(encoding="utf-8", errors="replace")
+
+
+def node_ids(tree: Path, tests: list[str]) -> list[str]:
+    return [t.split("::")[0] if t.endswith("::<module>") else t for t in tests if present(tree, t)]
+
+
+def run_traced_tests(interpreter: Path, tree: Path, tests: list[str], frames: list[str], side: str, out: Path,
+                     timeout: float) -> str | None:
+    out.unlink(missing_ok=True)
+    ids = node_ids(tree, tests)
+    if not ids:
+        return f"{side}: none of the covering tests exist on this side"
+    try:
+        proc = subprocess.run([str(interpreter), "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                               "-p", "flowdiff.pytest_tracer", *ids], cwd=tree, capture_output=True, text=True,
+                              timeout=timeout, env=env.harness_env(tree, side, out, frames))
+    except subprocess.TimeoutExpired:
+        return f"{side}: covering tests timed out after {timeout:.0f}s"
+    # 0 passed and 1 failed both traced the flow; anything else never ran it.
+    if proc.returncode not in (0, 1):
+        return f"{side}: pytest exited {proc.returncode}\n{(proc.stdout + proc.stderr).strip()[-2000:]}"
+    return None
+
+
 def run_tests(interpreter: Path, tree: Path, tests: list[str], timeout: float) -> dict[str, str]:
     results = {}
     for test in tests:
+        if not present(tree, test):
+            results[test] = "ABSENT"
+            continue
         try:
             proc = subprocess.run([str(interpreter), "-m", "pytest", "-q", "-x", "-p", "no:cacheprovider", test],
                                   cwd=tree, capture_output=True, text=True, timeout=timeout,
@@ -91,17 +125,26 @@ def run(args: argparse.Namespace) -> int:
         harness_path = out_dir / f"flow{i}.py"
         harness_path.write_text(harness.source)
         analysis.warnings += harness.warnings
-        if not harness.complete:
-            print(f"no call site with literal arguments; fill the slots in {harness_path} — harness not run")
+        frames = [harness_py.frame_id(root, f) for f in flow.frames if f.status != "slot"]
+        traces = {side: out_dir / f"flow{i}.{side}.jsonl" for side in ("base", "head")}
+        if harness.complete:
+            def drive(side: str, tree: Path) -> str | None:
+                return run_harness(interpreter, harness_path, tree, side, traces[side], args.run_timeout)
+        elif flow.tests:
+            print(f"no call site with literal arguments; driven by {len(flow.tests)} covering test(s)")
+
+            def drive(side: str, tree: Path) -> str | None:
+                return run_traced_tests(interpreter, tree, flow.tests, frames, side, traces[side], args.run_timeout)
+        else:
+            print(f"no call site with literal arguments and no covering test; fill the slots in {harness_path} "
+                  "— harness not run")
             cli.render_all(cli.Analysis(root, analysis.revs, [], analysis.warnings), args.full)
             return cli.EXIT_NOTHING
-        traces = {side: out_dir / f"flow{i}.{side}.jsonl" for side in ("base", "head")}
         for side, tree in (("base", base_holder[0]), ("head", root)):
-            failure = run_harness(interpreter, harness_path, tree, side, traces[side], args.run_timeout)
+            failure = drive(side, tree)
             if failure:
                 print(failure, file=sys.stderr)
                 return cli.EXIT_TOOL_ERROR
-        frames = [harness_py.frame_id(root, f) for f in flow.frames if f.status != "slot"]
         report = compare.Report(frames, compare.load(traces["base"]), compare.load(traces["head"]))
         print(compare.verdict(report))
         diverged = diverged or bool(report.differing())
