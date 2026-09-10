@@ -65,6 +65,7 @@ class Flow:
     edges: list[Edge]
     two_body: bool
     tests: list[str]
+    language: str = ""
 
 
 def node_of(sym: Symbol, status: str = "unchanged") -> Node:
@@ -298,5 +299,6 @@ def flows(client: LspClient, g: Graph, changed: list[ChangedSymbol], hops: int,
         edges = sorted((e for e in g.edges if e.src in frame_ids and e.dst in frame_ids),
                        key=lambda e: (e.src, e.dst))
         tests = covering_tests(client, frames) if with_tests else []
-        result.append(Flow([g.nodes[m] for m in member], entry, frames, edges, entry is None, tests))
+        result.append(Flow([g.nodes[m] for m in member], entry, frames, edges, entry is None, tests,
+                           client.config.language_id))
     return result
