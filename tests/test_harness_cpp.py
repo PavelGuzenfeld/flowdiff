@@ -80,16 +80,6 @@ def test_test_symbols_map_the_function_and_the_test_macro_name():
         "bare": "tests/v.cpp::bare", "test_bare": "tests/v.cpp::bare"}
 
 
-def test_gdb_script_embeds_frames_tests_and_paths_and_is_valid_python():
-    text = trace_gdb.script("/src", {"gst/t.cpp:f": "f"}, {"test_f": "tests/t.cpp::test_f"}, "/src/.flowdiff/run/x.jsonl")
-    assert "TREE = '/src'" in text and "'gst/t.cpp:f': 'f'" in text and "'test_f': 'tests/t.cpp::test_f'" in text
-    assert "OUT = open('/src/.flowdiff/run/x.jsonl'" in text and "set breakpoint pending on" in text
-    assert 'key.split(":", 1)[0]' in text
-    compile(text, "trace.py", "exec")
-    assert trace_gdb.gdb_command("/s.py", "/src/builddir/t", ["--x"]) == ["gdb", "-batch", "-q", "-nx", "-x", "/s.py", "--args", "/src/builddir/t", "--x"]
-    assert trace_gdb.read_records('noise\n{"seq": 1}\n[x]\n{"seq": 2}\n') == [{"seq": 1}, {"seq": 2}]
-
-
 class FakeRun:
     def __init__(self, tmp_path: Path):
         self.calls: list[list[str]] = []

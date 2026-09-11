@@ -91,10 +91,20 @@ def test_wait_for_index_blocks_until_the_background_index_ends(tmp_path: Path, m
         c.close()
 
 
+def settled_state(client: LspClient) -> dict:
+    """The client answers the server's configuration request from its read thread, so it can reach the
+    fake server after a request sent from the test thread; ask until that reply has landed."""
+    for _ in range(50):
+        state = client.request("test/state", None)
+        if state["config_reply"] is not None:
+            return state
+    raise AssertionError("configuration reply never reached the server")
+
+
 def test_the_client_advertises_exactly_the_capabilities_it_relies_on(client: LspClient, tmp_path: Path):
     client.open(tmp_path / "m.py", "print(1)\n")
     client.references(tmp_path / "m.py", Position(1, 8))
-    state = client.request("test/state", None)
+    state = settled_state(client)
     caps = state["init"]["capabilities"]
     assert caps["textDocument"]["documentSymbol"] == {"hierarchicalDocumentSymbolSupport": True}
     assert caps["textDocument"]["callHierarchy"] == {"dynamicRegistration": False}
@@ -127,7 +137,11 @@ def test_a_server_request_the_client_does_not_know_is_answered_with_null(tmp_pat
     c = LspClient(fake_config(), tmp_path, timeout=5)
     try:
         c.request("test/indexed", None)
-        assert c.request("test/state", None)["progress_reply"] is None
+        for _ in range(50):
+            state = c.request("test/state", None)
+            if state["progress_reply"] != "unset":
+                break
+        assert state["progress_reply"] is None
     finally:
         c.close()
 
@@ -136,8 +150,9 @@ def test_headers_other_than_content_length_are_skipped(tmp_path: Path, monkeypat
     monkeypatch.setenv("FAKE_EXTRA_HEADER", "1")
     c = LspClient(fake_config(), tmp_path, timeout=5)
     try:
-        assert c.request("test/state", None)["config_reply"] == [None, None]
-        assert c.request("test/state", None) is not None
+        assert settled_state(c)["config_reply"] == [None, None]
+        c.open(tmp_path / "m.py", "")
+        assert [s.name for s in c.document_symbols(tmp_path / "m.py")] == ["C", "m"]
     finally:
         c.close()
 
