@@ -29,7 +29,7 @@ class Tracer:
         self.seq = 0
         self._tool = None
         self._previous_trace: Any = None
-        summarise.load_project_summariser(self.tree)
+        summarise.load_project_summariser(self.tree, os.environ.get("FLOWDIFF_SCRATCH"))
 
     def key_of(self, code: Any) -> Optional[str]:
         key = frame_key(self.tree, code.co_filename, code.co_name)

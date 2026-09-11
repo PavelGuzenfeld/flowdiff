@@ -68,6 +68,7 @@ def test_harness_env_points_pythonpath_at_the_tree_first(tmp_path: Path, monkeyp
     assert e["PYTHONHASHSEED"] == "0" and e["PYTHONDONTWRITEBYTECODE"] == "1"
     assert e["FLOWDIFF_TREE"] == str(tmp_path) and e["FLOWDIFF_SIDE"] == "base"
     assert e["FLOWDIFF_OUT"] == str(tmp_path / "out.jsonl") and e["FLOWDIFF_FRAMES"] == '["lib.py:f"]'
+    assert e["FLOWDIFF_SCRATCH"] == str(tmp_path.parent)
     assert Path(e["FLOWDIFF_TOOL"]) == env.TOOL_ROOT and (env.TOOL_ROOT / "flowdiff" / "trace_py.py").exists()
     assert env.harness_env(tmp_path, "base", tmp_path / "out.jsonl")["FLOWDIFF_FRAMES"] == "[]"
 

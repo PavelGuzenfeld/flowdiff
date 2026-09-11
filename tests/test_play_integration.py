@@ -73,12 +73,31 @@ def test_play_falls_back_to_the_covering_tests_when_nothing_lifts(project: Path,
     git(project, "commit", "-q", "-m", "add test")
     (project / "lib.py").write_text(BEFORE.replace("* 2", "* 3"))
     assert cli.main(["play", "--repo", str(project)]) == 0
-    out = capsys.readouterr().out
-    assert "no call site with literal arguments; driven by 1 covering test(s)" in out
-    assert "1 of 2 frames differ; origin scale: return 8 → 12" in out
-    assert "tests/test_lib.py::test_scale  PASS→FAIL" in out
+    captured = capsys.readouterr()
+    assert "no call site with literal arguments; driven by 1 covering test(s) present on both sides" in captured.out
+    assert "1 of 2 frames differ; origin scale: return 8 → 12" in captured.out
+    assert "tests/test_lib.py::test_scale  PASS→FAIL" in captured.out
+    assert "driving tests changed" not in captured.err
+    (project / "tests" / "test_lib.py").write_text(
+        "from lib import scale\n\nFOUR = 5\n\n\ndef test_scale():\n    assert scale(FOUR) == 8\n")
+    assert cli.main(["play", "--repo", str(project)]) == 0
+    captured = capsys.readouterr()
+    assert "origin scale: value 4 → 5" in captured.out
+    assert "warning: the driving tests changed in this diff (tests/test_lib.py); a divergence may reflect " \
+           "the inputs rather than the code" in captured.err
     assert cli.main(["play", "--repo", str(project), "--no-tests"]) == 2
-    assert "no covering test; fill the slots" in capsys.readouterr().out
+    assert "no covering test present on both sides; fill the slots" in capsys.readouterr().out
+
+
+def test_an_extracted_helper_is_a_new_frame_not_a_divergence(played: Path, capsys):
+    (played / "lib.py").write_text(BEFORE.replace("def scale(value):\n    return clamp(value, 100) * 2",
+                                                  "def double(v):\n    return v * 2\n\n\n"
+                                                  "def scale(value):\n    return double(clamp(value, 100))"))
+    assert cli.main(["play", "--repo", str(played), "--no-tests"]) == 0
+    out = capsys.readouterr().out
+    assert "double+" in out and "identical: 3 frames traced, no value differs" in out
+    assert cli.main(["show", "double", "--repo", str(played)]) == 0
+    assert capsys.readouterr().out.startswith("lib.py:double  base 0 call(s), head 1 call(s)")
 
 
 def test_play_identical_behaviour_says_so(played: Path, capsys):

@@ -94,6 +94,14 @@ def test_an_exception_outside_the_flow_neither_records_nor_breaks_the_trace(tmp_
     assert recs[1]["return"] == 10
 
 
+def test_tree_and_scratch_paths_in_values_are_normalised(tmp_path: Path, lib, backend, monkeypatch):
+    monkeypatch.setenv("FLOWDIFF_SCRATCH", str(tmp_path / ".flowdiff"))
+    recs = run(tmp_path, lib, ["lib.py:g"], lambda m: m.g(str(tmp_path / ".flowdiff" / "run" / "x")))
+    assert recs[0]["args"] == {"x": "<scratch>/run/x"}
+    recs = run(tmp_path, lib, ["lib.py:g"], lambda m: m.g(str(tmp_path / "data")))
+    assert recs[0]["args"] == {"x": "<tree>/data"}
+
+
 def test_varargs_and_keywords_are_named_with_their_stars(tmp_path: Path, lib, backend):
     recs = run(tmp_path, lib, ["lib.py:f"], lambda m: m.f(1, 2, 3, k="v"))
     assert recs[0]["args"] == {"x": 1, "*rest": [2, 3], "**opts": {"k": "v"}}
