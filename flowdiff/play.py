@@ -7,9 +7,11 @@ import json
 import subprocess
 import sys
 from collections import Counter
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
-from . import cli, compare, env, graph, harness_py, lsp, render, worktree
+from . import cli, compare, container, env, graph, harness_cpp, harness_py, lsp, render, worktree
 
 RUN_DIR = "run"
 
@@ -106,85 +108,170 @@ def test_delta(interpreter: Path, base: Path, root: Path, tests: list[str], time
     return lines
 
 
+@dataclass
+class Plan:
+    """How one flow gets run on a side: a harness, the covering tests, or nothing (empty slots)."""
+    frames: list[str]
+    note: str | None = None
+    stop: str | None = None
+    driver: str | None = None
+    warnings: list[str] = field(default_factory=list)
+    drive: Callable[[str, Path], str | None] | None = None
+    delta: Callable[[], list[str]] | None = None
+    trailer: list[str] = field(default_factory=list)
+
+
+def python_plan(client: lsp.LspClient, g: graph.Graph, flow: graph.Flow, root: Path, base: Path, out_dir: Path,
+                index: int, timeout: float) -> Plan:
+    harness = harness_py.build(client, root, base, flow, g)
+    harness_path = out_dir / f"flow{index}.py"
+    harness_path.write_text(harness.source)
+    frames = [harness_py.frame_id(root, f) for f in flow.frames if f.status != "slot"]
+    traces = {side: out_dir / f"flow{index}.{side}.jsonl" for side in ("base", "head")}
+    interpreter = env.python_interpreter(root)
+    plan = Plan(frames, warnings=list(harness.warnings), driver=harness.driver)
+    shared, changed_tests = shared_tests(base, root, flow.tests) if flow.tests else ([], [])
+    if harness.complete:
+        plan.drive = lambda side, tree: run_harness(interpreter, harness_path, tree, side, traces[side], timeout)
+    elif shared:
+        plan.note = f"driven by {len(shared)} covering test(s) present on both sides"
+        if changed_tests:
+            plan.warnings.append(f"the driving tests changed in this diff ({', '.join(changed_tests)}); "
+                                 "a divergence may reflect the inputs rather than the code")
+        plan.drive = lambda side, tree: run_traced_tests(interpreter, tree, shared, frames, side, traces[side], timeout)
+    else:
+        plan.stop = ("no call site with literal arguments and no covering test present on both sides; "
+                     f"fill the slots in {harness_path} — harness not run")
+    if flow.tests:
+        plan.delta = lambda: test_delta(interpreter, base, root, flow.tests, timeout)
+    return plan
+
+
+def cpp_plan(ctr: container.Container, flow: graph.Flow, root: Path, base: Path, out_dir: Path, index: int,
+             timeout: float, build_timeout: float) -> Plan:
+    """C++ flows are driven by the built test executables that reach them, traced under gdb in the container."""
+    frames = [harness_cpp.frame_id(root, f) for f in flow.frames if f.status != "slot"]
+    plan = Plan(frames)
+    test_files = sorted({t.split("::")[0] for t in flow.tests})
+    head_exes = harness_cpp.test_executables(root, test_files)
+    if not head_exes:
+        plan.stop = ("no built test executable reaches this flow; C++ flows are driven by their covering tests "
+                     "and the literal harness is not available yet")
+        return plan
+    built: set[Path] = {root}
+    traces = {side: out_dir / f"flow{index}.{side}.jsonl" for side in ("base", "head")}
+    gdb_frames = harness_cpp.gdb_frames(root, flow)
+    tests = harness_cpp.test_symbols(flow.tests)
+
+    def ensure_built(tree: Path) -> str | None:
+        if tree in built:
+            return None
+        print(f"building {tree.relative_to(root)} in {ctr.image}", file=sys.stderr)
+        failure = container.build(ctr, tree, build_timeout)
+        built.add(tree)
+        return failure
+
+    def drive(side: str, tree: Path) -> str | None:
+        failure = ensure_built(tree)
+        if failure:
+            return failure
+        exes = harness_cpp.test_executables(tree, test_files)
+        shared = [exes[f] for f in test_files if f in exes and f in head_exes]
+        if not shared:
+            return f"{side}: none of the covering test executables exist on this side"
+        local = out_dir / f"flow{index}.{side}.gdb.jsonl" if tree == root else worktree.scratch_dir(tree) / "run" / f"flow{index}.jsonl"
+        (local.parent).mkdir(parents=True, exist_ok=True)
+        failure = harness_cpp.trace_tests(ctr, tree, shared, gdb_frames, tests, local, timeout)
+        if failure:
+            return failure
+        traces[side].write_text(local.read_text())
+        return None
+
+    plan.note = f"driven by {len(head_exes)} covering test executable(s) under gdb"
+    plan.drive = drive
+
+    def delta() -> list[str]:
+        before = harness_cpp.run_executables(ctr, base, list(head_exes.values()), timeout)
+        after = harness_cpp.run_executables(ctr, root, list(head_exes.values()), timeout)
+        return [f"  {exe}  {before.get(exe, 'ABSENT')}→{after[exe]}" for exe in head_exes.values()]
+
+    plan.delta = delta
+    device, variant = harness_cpp.linked_variant(ctr, root, list(head_exes.values()))
+    plan.trailer.append(variant)
+    if device:
+        plan.stop = f"{variant}; these frames need the device: {', '.join(sorted(f.name for f in flow.frames))}"
+    return plan
+
+
 def run(args: argparse.Namespace) -> int:
-    harnesses: dict[int, harness_py.Harness] = {}
+    plans: dict[int, Plan] = {}
     base_holder: list[Path] = []
 
     def visit(client: lsp.LspClient, g: graph.Graph, flows: list[graph.Flow], analysis: cli.Analysis) -> None:
-        if client.config.language_id != "python":
-            return
         root = client.root
         if not base_holder:
             base_holder.append(worktree.base_worktree(root, args.ref or "HEAD", args.clean_base))
-        graph.open_test_files(client, g)
+        out_dir = run_dir(root)
+        if client.config.language_id == "python":
+            graph.open_test_files(client, g)
         for flow in flows:
-            if not flow.removed_only:
-                harnesses[id(flow)] = harness_py.build(client, root, base_holder[0], flow, g)
+            if flow.removed_only:
+                continue
+            index = len(plans) + 1
+            if client.config.language_id == "python":
+                plans[id(flow)] = python_plan(client, g, flow, root, base_holder[0], out_dir, index, args.run_timeout)
+            elif analysis.container is not None:
+                plans[id(flow)] = cpp_plan(analysis.container, flow, root, base_holder[0], out_dir, index,
+                                           args.run_timeout, args.build_timeout)
+            else:
+                analysis.warnings.append(f"{flow.language} flows outside a container are analysed only")
 
     analysis = cli.analyse(args, visit)
     if isinstance(analysis, int):
         return analysis
     root = analysis.root
     shown = [f for f in analysis.flows if not f.removed_only]
-    for flow in shown:
-        if flow.language != "python":
-            analysis.warnings.append(f"{flow.language} flows are analysed only; play is Python-only for now")
-    if not harnesses:
+    if not plans:
         cli.render_all(analysis, args.full, args.list_tests)
         return cli.EXIT_NOTHING
 
     out_dir = run_dir(root)
-    interpreter = env.python_interpreter(root)
     index: list[dict] = []
     diverged = False
     for i, flow in enumerate(shown, 1):
-        if id(flow) not in harnesses:
+        if id(flow) not in plans:
             print(render.render_flow(i, len(shown), flow, args.full, args.list_tests))
             print()
             continue
-        harness = harnesses[id(flow)]
-        harness_path = out_dir / f"flow{i}.py"
-        harness_path.write_text(harness.source)
-        analysis.warnings += harness.warnings
-        frames = [harness_py.frame_id(root, f) for f in flow.frames if f.status != "slot"]
+        plan = plans[id(flow)]
+        analysis.warnings += plan.warnings
         traces = {side: out_dir / f"flow{i}.{side}.jsonl" for side in ("base", "head")}
-        shared, changed_tests = shared_tests(base_holder[0], root, flow.tests) if flow.tests else ([], [])
-        note = None
-        if harness.complete:
-            def drive(side: str, tree: Path) -> str | None:
-                return run_harness(interpreter, harness_path, tree, side, traces[side], args.run_timeout)
-        elif shared:
-            note = f"driven by {len(shared)} covering test(s) present on both sides"
-            if changed_tests:
-                analysis.warnings.append(f"the driving tests changed in this diff ({', '.join(changed_tests)}); "
-                                         "a divergence may reflect the inputs rather than the code")
-
-            def drive(side: str, tree: Path) -> str | None:
-                return run_traced_tests(interpreter, tree, shared, frames, side, traces[side], args.run_timeout)
-        else:
+        if plan.stop or plan.drive is None:
             print(render.render_flow(i, len(shown), flow, args.full, args.list_tests))
-            print("no call site with literal arguments and no covering test present on both sides; "
-                  f"fill the slots in {harness_path} — harness not run")
+            print(plan.stop or "nothing can drive this flow")
             cli.render_all(cli.Analysis(root, analysis.revs, [], analysis.warnings), args.full)
             return cli.EXIT_NOTHING
-        print(render.render_flow(i, len(shown), flow, args.full, args.list_tests, note))
-        if note and flow.entry is not None:
-            print(f"no call site with literal arguments; {note}")
+        print(render.render_flow(i, len(shown), flow, args.full, args.list_tests, plan.note))
+        if plan.note and flow.entry is not None:
+            print(f"no call site with literal arguments; {plan.note}")
         for side, tree in (("base", base_holder[0]), ("head", root)):
-            failure = drive(side, tree)
+            failure = plan.drive(side, tree)
             if failure:
                 print(failure, file=sys.stderr)
                 return cli.EXIT_TOOL_ERROR
-        one_sided = {harness_py.frame_id(root, f) for f in flow.frames if f.status in ("added", "removed")}
-        report = compare.Report(frames, compare.load(traces["base"]), compare.load(traces["head"]), one_sided)
+        one_sided = {f for f, node in zip(plan.frames, [n for n in flow.frames if n.status != "slot"])
+                     if node.status in ("added", "removed")}
+        report = compare.Report(plan.frames, compare.load(traces["base"]), compare.load(traces["head"]), one_sided)
         print(compare.verdict(report))
+        for line in plan.trailer:
+            print(line)
         diverged = diverged or bool(report.differing())
         for frame in report.traced()[:args.depth]:
             print(compare.show(report, frame))
-        if flow.tests:
-            print("\n".join(test_delta(interpreter, base_holder[0], root, flow.tests, args.run_timeout)))
-        index.append({"flow": i, "frames": frames, "base": str(traces["base"]), "head": str(traces["head"]),
-                      "driver": harness.driver})
+        if plan.delta is not None:
+            print("\n".join(plan.delta()))
+        index.append({"flow": i, "frames": plan.frames, "base": str(traces["base"]), "head": str(traces["head"]),
+                      "driver": plan.driver})
         if i < len(shown):
             print()
     removed = [f for f in analysis.flows if f.removed_only]

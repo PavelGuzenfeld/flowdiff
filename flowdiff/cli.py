@@ -139,11 +139,12 @@ def analyse(args: argparse.Namespace, visit: Visitor | None = None) -> Analysis 
     for config, server_hunks in by_server.items():
         client = lsp.LspClient(config, root, timeout=args.timeout)
         try:
-            if config.language_id == "cpp" and not client.wait_for_index(args.build_timeout):
-                analysis.warnings.append("clangd was still indexing when asked; callers and tests may be incomplete")
             changed = changes.changed_symbols(client, revs, server_hunks, config.ast_grep_language)
             if not changed:
                 continue
+            # clangd loads the compile database and starts indexing at the first didOpen, which changed_symbols sent.
+            if config.language_id == "cpp" and not client.wait_for_index(args.build_timeout):
+                analysis.warnings.append("clangd was still indexing when asked; callers and tests may be incomplete")
             g = graph.build_graph(client, changed, args.hops)
             flows = graph.flows(client, g, changed, args.hops, not args.no_tests)
             if visit is not None:
