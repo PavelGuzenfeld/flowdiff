@@ -5,6 +5,10 @@ import sys
 
 FILE_URI = None
 CONFIG_REPLY = None
+PROGRESS_REPLY = "unset"
+INIT_PARAMS = None
+LAST_OPEN = None
+LAST_REFERENCES = None
 
 
 def read():
@@ -22,7 +26,8 @@ def read():
 
 def send(msg):
     body = json.dumps(msg).encode()
-    sys.stdout.buffer.write(b"Content-Length: %d\r\n\r\n" % len(body) + body)
+    extra = b"Content-Type: application/vscode-jsonrpc; charset=utf-8\r\n" if os.environ.get("FAKE_EXTRA_HEADER") else b""
+    sys.stdout.buffer.write(extra + b"Content-Length: %d\r\n\r\n" % len(body) + body)
     sys.stdout.buffer.flush()
 
 
@@ -35,15 +40,17 @@ def rng(l1, c1, l2, c2):
 
 
 def handle(msg):
-    global FILE_URI, CONFIG_REPLY
+    global FILE_URI, CONFIG_REPLY, PROGRESS_REPLY, INIT_PARAMS, LAST_OPEN, LAST_REFERENCES
     method = msg.get("method")
     rid = msg.get("id")
     if method is None and rid == 100:
         CONFIG_REPLY = msg.get("result")
         return
     if method is None and rid == 101:
+        PROGRESS_REPLY = msg.get("result")
         return
     if method == "initialize":
+        INIT_PARAMS = msg["params"]
         reply(rid, {"capabilities": {}})
         send({"jsonrpc": "2.0", "id": 100, "method": "workspace/configuration",
               "params": {"items": [{"section": "a"}, {"section": "b"}]}})
@@ -58,6 +65,10 @@ def handle(msg):
         reply(rid, None)
     elif method == "textDocument/didOpen":
         FILE_URI = msg["params"]["textDocument"]["uri"]
+        LAST_OPEN = msg["params"]["textDocument"]
+    elif method == "test/state":
+        reply(rid, {"init": INIT_PARAMS, "open": LAST_OPEN, "references": LAST_REFERENCES,
+                    "progress_reply": PROGRESS_REPLY, "config_reply": CONFIG_REPLY})
     elif method == "textDocument/documentSymbol":
         reply(rid, [{"name": "C", "kind": 5, "detail": "", "range": rng(0, 0, 5, 0),
                      "selectionRange": rng(0, 6, 0, 7),
@@ -72,6 +83,9 @@ def handle(msg):
     elif method == "callHierarchy/outgoingCalls":
         if os.environ.get("FAKE_NO_OUTGOING"):
             send({"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": "method not found"}})
+        elif os.environ.get("FAKE_OUTGOING"):
+            reply(rid, [{"to": {"name": "callee", "kind": 12, "uri": FILE_URI, "range": rng(11, 0, 12, 0),
+                                "selectionRange": rng(11, 4, 11, 10)}, "fromRanges": []}])
         else:
             reply(rid, [])
     elif method == "workspace/symbol":
@@ -79,6 +93,7 @@ def handle(msg):
                      "location": {"uri": FILE_URI, "range": rng(1, 4, 4, 0)}},
                     {"name": "other", "kind": 12}])
     elif method == "textDocument/references":
+        LAST_REFERENCES = msg["params"]
         reply(rid, [{"uri": FILE_URI, "range": rng(8, 4, 8, 5)}])
     elif method == "textDocument/definition":
         reply(rid, {"targetUri": FILE_URI, "targetRange": rng(1, 0, 4, 0),
