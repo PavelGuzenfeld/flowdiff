@@ -30,7 +30,7 @@ def test_play_runs_both_sides_and_names_the_origin_frame(played: Path, capsys):
     assert cli.main(["play", "--repo", str(played)]) == 0
     out = capsys.readouterr().out
     assert "scale~" in out and "clamp" in out
-    assert "1 of 2 frames differ; origin scale: return 8 → 12" in out
+    assert "1 of 2 frames differ: scale (return); origin scale" in out
     assert "tests/test_lib.py::test_scale  PASS→FAIL" in out
     assert "#1" not in out
     assert git(played, "status", "--short").split() == ["M", "lib.py"]
@@ -40,13 +40,13 @@ def test_show_after_play_differs_exactly_where_the_edit_differs(played: Path, ca
     assert cli.main(["play", "--repo", str(played), "--no-tests"]) == 0
     capsys.readouterr()
     assert cli.main(["show", "scale", "--repo", str(played)]) == 0
-    lines = capsys.readouterr().out.splitlines()
-    assert lines[0] == "lib.py:scale  base 1 call(s), head 1 call(s)"
-    assert lines[1].split() == ["#1", "value", "4", "4"]
-    assert lines[2].split() == ["#1", "return", "8", "12", "*"]
+    assert capsys.readouterr().out.splitlines() == ["lib.py:scale  base 1 call(s), head 1 call(s)",
+                                                    "  calls #1", "    return  8  →  12"]
     assert cli.main(["show", "clamp", "--repo", str(played)]) == 0
-    clamp = capsys.readouterr().out
-    assert "*" not in clamp and "ceiling" in clamp and clamp.count("4") >= 4
+    assert capsys.readouterr().out.splitlines() == ["lib.py:clamp  base 1 call(s), head 1 call(s)",
+                                                    "  1 identical call(s): #1"]
+    assert cli.main(["show", "clamp/ceiling", "--repo", str(played)]) == 0
+    assert capsys.readouterr().out.splitlines()[1:] == ["  calls #1", "    ceiling  100  →  100"]
 
 
 def test_play_depth_prints_values_inline_and_fail_on_diff_exits_3(played: Path, capsys):
@@ -75,14 +75,14 @@ def test_play_falls_back_to_the_covering_tests_when_nothing_lifts(project: Path,
     assert cli.main(["play", "--repo", str(project)]) == 0
     captured = capsys.readouterr()
     assert "no call site with literal arguments; driven by 1 covering test(s) present on both sides" in captured.out
-    assert "1 of 2 frames differ; origin scale: return 8 → 12" in captured.out
+    assert "1 of 2 frames differ: scale (return); origin scale" in captured.out
     assert "tests/test_lib.py::test_scale  PASS→FAIL" in captured.out
     assert "driving tests changed" not in captured.err
     (project / "tests" / "test_lib.py").write_text(
         "from lib import scale\n\nFOUR = 5\n\n\ndef test_scale():\n    assert scale(FOUR) == 8\n")
     assert cli.main(["play", "--repo", str(project)]) == 0
     captured = capsys.readouterr()
-    assert "origin scale: value 4 → 5" in captured.out
+    assert "2 of 2 frames differ: scale (value, return); clamp (value, return); origin scale" in captured.out
     assert "warning: the driving tests changed in this diff (tests/test_lib.py); a divergence may reflect " \
            "the inputs rather than the code" in captured.err
     assert cli.main(["play", "--repo", str(project), "--no-tests"]) == 2
@@ -114,7 +114,7 @@ def test_play_drives_the_flow_from_a_caller_when_the_entry_has_no_literal_site(p
     (project / "lib.py").write_text(BEFORE.replace("* 2", "* 3"))
     assert cli.main(["play", "--repo", str(project), "--no-tests"]) == 0
     captured = capsys.readouterr()
-    assert "1 of 2 frames differ; origin scale: return 6 → 9" in captured.out
+    assert "1 of 2 frames differ: scale (return); origin scale" in captured.out
     assert "warning: scale: driven from entry, the nearest caller with a literal call site" in captured.err
     assert "lib.entry(3)" in (project / ".flowdiff" / "run" / "flow1.py").read_text()
 

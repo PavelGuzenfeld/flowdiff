@@ -62,7 +62,8 @@ def test_raises_versus_return_is_a_divergence_on_both_fields():
     base = {"f": [compare.Call(1, {}, 4, end=2)]}
     head = {"f": [compare.Call(1, {}, raises="ValueError", end=2)]}
     fields = [(d.field, d.base, d.head) for d in report(base, head).divergences("f")]
-    assert fields == [("raises", None, "ValueError"), ("return", 4, None)]
+    assert fields == [("raises", compare.MISSING, "ValueError"), ("return", 4, compare.MISSING)]
+    assert [d.describe() for d in report(base, head).divergences("f")] == ["raises — → \"ValueError\"", "return 4 → —"]
 
 
 def test_a_call_present_on_one_side_only_is_a_divergence_in_its_own_right():
@@ -81,7 +82,7 @@ def test_added_and_removed_frames_do_not_diverge_by_existing_on_one_side_only():
     r = compare.Report(["f", "new", "old"], base, head, one_sided={"new", "old"})
     assert r.divergences("new") == [] and r.divergences("old") == []
     assert r.differing() == ["f"] and r.traced() == ["f", "new", "old"]
-    assert compare.verdict(r) == "1 of 3 frames differ; origin f: return 4 → 9"
+    assert compare.verdict(r) == "1 of 3 frames differ: f (return); origin f"
     plain = compare.Report(["f", "new", "old"], base, head)
     assert plain.differing() == ["f", "new", "old"]
     assert compare.verdict(compare.Report(["new"], {}, {"new": head["new"]}, {"new"})) \
@@ -103,27 +104,91 @@ def test_verdict_wording_for_each_outcome():
     assert compare.verdict(report(base, head, frames=("lib.py:f", "g")).__class__(["lib.py:f", "lib.py:g"],
                            {"lib.py:f": base["f"], "lib.py:g": base["g"]},
                            {"lib.py:f": head["f"], "lib.py:g": head["g"]})) \
-        == "2 of 2 frames differ; origin g: return 2 → 3"
+        == "2 of 2 frames differ: f (return); g (return); origin g"
 
 
-def test_show_lays_out_base_and_head_columns_and_marks_differences():
+def obj(type_name: str, **fields) -> dict:
+    return {"type": type_name, "fields": fields}
+
+
+def test_leaves_fold_object_fields_and_descend_into_dicts_and_equal_length_lists():
+    base = obj("Cfg", a=1, tags=["x", "y"], inner=obj("In", k=1), gone=0, d={"p": 1, "q": 2})
+    head = obj("Cfg", a=1, tags=["x", "z"], inner=obj("In", k=2), new=True, d={"p": 1, "q": 3, "r": 4})
+    assert compare.leaves(base, head, "return") == [
+        ("return.tags[1]", "y", "z"), ("return.inner.k", 1, 2), ("return.gone", 0, compare.MISSING),
+        ("return.d.q", 2, 3), ("return.d.r", compare.MISSING, 4), ("return.new", compare.MISSING, True)]
+    assert compare.leaves(obj("A", x=1), obj("B", x=1), "r") == [("r", obj("A", x=1), obj("B", x=1))]
+    assert compare.leaves([1, 2], [1, 2, 3], "r") == [("r", [1, 2], [1, 2, 3])]
+    assert compare.leaves({"k": obj("A", x=1)}, {"k": 5}, "r") == [("r.k", obj("A", x=1), 5)]
+    assert compare.leaves(obj("A", x=1), obj("A", x=1), "r") == [] and compare.leaves(3, 3, "r") == []
+
+
+def test_divergences_are_per_leaf_and_the_verdict_names_paths_not_values():
+    base = {"f": [compare.Call(1, {"cfg": obj("Cfg", a=1, b=[1, 2])}, obj("Out", ok=True), end=2)]}
+    head = {"f": [compare.Call(1, {"cfg": obj("Cfg", a=1, b=[1, 3], c=None)}, obj("Out", ok=False), end=2)]}
+    r = report(base, head, frames=("f",))
+    assert [d.field for d in r.divergences("f")] == ["cfg.b[1]", "cfg.c", "return.ok"]
+    assert r.changed_paths("f") == "cfg.b[1], cfg.c, return.ok"
+    assert r.changed_paths("f", limit=2) == "cfg.b[1], cfg.c, +1 more"
+    assert compare.verdict(r) == "1 of 1 frames differ: f (cfg.b[1], cfg.c, return.ok); origin f"
+
+
+def test_changed_paths_dedupe_across_calls_and_name_one_sided_calls():
+    base = {"f": [compare.Call(1, {"x": 1}, 4, end=2), compare.Call(3, {"x": 1}, 4, end=4)]}
+    head = {"f": [compare.Call(1, {"x": 1}, 5, end=2), compare.Call(3, {"x": 1}, 6, end=4), compare.Call(5, {}, 0, end=6)]}
+    assert report(base, head, frames=("f",)).changed_paths("f") == "return, call #3 only on head"
+
+
+def test_show_prints_differing_leaves_and_groups_identical_calls():
     base = {"f": [compare.Call(1, {"x": 1, "y": "a"}, 4, end=2)]}
     head = {"f": [compare.Call(1, {"x": 1}, 6, end=2), compare.Call(3, {"x": 2}, 8, end=4)]}
-    out = compare.show(report(base, head), "f")
-    lines = out.splitlines()
-    assert lines[0] == "f  base 1 call(s), head 2 call(s)"
-    assert lines[1].split() == ["#1", "x", "1", "1"]
-    assert lines[2].split() == ["#1", "y", '"a"', "—", "*"]
-    assert lines[3].split() == ["#1", "return", "4", "6", "*"]
-    assert lines[4].split() == ["#2", "x", "—", "2", "*"]
-    assert lines[5].split() == ["#2", "return", "—", "8", "*"]
+    assert compare.show(report(base, head), "f").splitlines() == [
+        "f  base 1 call(s), head 2 call(s)",
+        "  calls #1", '    y       "a"  →  —', "    return  4  →  6",
+        "  calls #2", "    x       —  →  2", "    return  —  →  8"]
 
 
-def test_show_can_narrow_to_one_argument_and_keeps_head_only_arguments():
-    base = {"f": [compare.Call(1, {"x": 1}, 4, end=2)]}
-    head = {"f": [compare.Call(1, {"x": 1, "z": 0}, 4, end=2)]}
-    assert compare.show(report(base, head), "f", "x").splitlines()[1:] == ["  #1   x              1                            1"]
-    assert compare.show(report(base, head), "f", "z").splitlines()[1].split() == ["#1", "z", "—", "0", "*"]
+def test_show_groups_repeated_outcomes_and_counts_identical_calls():
+    same_in = {"lang": "py"}
+    base = {"f": [compare.Call(i, same_in, obj("Cfg", a=1), end=i) for i in (1, 3, 4, 7)] + [compare.Call(5, {}, None, end=5)]}
+    head = {"f": [compare.Call(1, same_in, obj("Cfg", a=1, n=True), end=1), compare.Call(3, same_in, obj("Cfg", a=1, n=True), end=3),
+                  compare.Call(4, same_in, obj("Cfg", a=1, n=True), end=4), compare.Call(7, same_in, obj("Cfg", a=1, n=False), end=7),
+                  compare.Call(5, {}, None, end=5)]}
+    assert compare.show(report(base, head), "f").splitlines() == [
+        "f  base 5 call(s), head 5 call(s)",
+        "  calls #1-#3 (×3)", "    return.n  —  →  true",
+        "  calls #4", "    return.n  —  →  false",
+        "  1 identical call(s): #5"]
+    assert compare.call_labels([0, 2, 3, 4, 5, 8]) == "#1,#3-#6,#9"
+
+
+def test_show_with_a_path_prints_that_leaf_whole_for_every_call_even_when_equal():
+    base = {"f": [compare.Call(1, {"x": 1}, obj("Cfg", tags=["a", "b"]), end=2)]}
+    head = {"f": [compare.Call(1, {"x": 1, "z": 0}, obj("Cfg", tags=["a", "c"]), end=2)]}
+    r = report(base, head)
+    assert compare.show(r, "f", "x").splitlines()[1:] == ["  calls #1", "    x  1  →  1"]
+    assert compare.show(r, "f", "z").splitlines()[1:] == ["  calls #1", "    z  —  →  0"]
+    assert compare.show(r, "f", "return.tags[1]").splitlines()[2] == '    return.tags[1]  "b"  →  "c"'
+    assert compare.show(r, "f", "return.tags").splitlines()[2] == '    return.tags  ["a", "b"]  →  ["a", "c"]'
+    assert compare.show(r, "f", "return.nope").splitlines()[2] == "    return.nope  —  →  —"
+    assert compare.show(r, "f", "y").splitlines()[1:] == ["  1 identical call(s): #1"]
+
+
+def test_show_caps_the_path_column_so_one_long_path_does_not_push_the_rest():
+    assert compare.PATH_COLUMN == 40
+    long_key = "k" * 70
+    base = {"f": [compare.Call(1, {"d": {long_key: 1, "s": 1}}, 0, end=2)]}
+    head = {"f": [compare.Call(1, {"d": {long_key: 2, "s": 2}}, 0, end=2)]}
+    lines = compare.show(report(base, head), "f").splitlines()
+    assert lines[2] == f"    d.{long_key}  1  →  2"
+    assert lines[3] == "    d.s" + " " * (40 - 3) + "  1  →  2"
+
+
+def test_descend_follows_fields_and_indices_and_stops_at_missing():
+    value = obj("Cfg", tags=["a", {"k": 7}], inner=obj("In", n=1))
+    assert compare.descend(value, ".tags[1].k") == 7 and compare.descend(value, ".inner.n") == 1
+    assert compare.descend(value, ".tags[5]") is compare.MISSING and compare.descend(value, ".zzz.k") is compare.MISSING
+    assert compare.descend(compare.MISSING, ".a") is compare.MISSING and compare.descend(3, "") == 3
 
 
 def test_brief_cuts_at_sixty_characters_inclusive():
@@ -144,7 +209,7 @@ def test_describe_and_show_use_brief_values_but_a_named_argument_is_whole():
     table = compare.show(report(base, head), "f")
     assert "…" in table and json.dumps(big) not in table
     whole = compare.show(report(base, head), "f", "obj")
-    assert json.dumps(big) in whole
+    assert json.dumps(big) in whole and whole.splitlines()[1] == "  calls #1"
 
 
 def test_resolve_accepts_the_short_name_or_the_full_frame():

@@ -105,6 +105,11 @@ def test_verdict_variants():
     assert render.verdict(f).startswith("1 new symbols, nothing older to enter from: c+")
     f = flow([node("c", "signature")], [], changed=[node("c", "signature")], tests=["t::x"])
     assert "two-body harness required" in render.verdict(f) and "covered by 1 test(s)" in render.verdict(f)
+    noted = render.verdict(f, "driven by 3 covering test(s) present on both sides")
+    assert "two-body" not in noted and "; driven by 3 covering test(s) present on both sides\n" in noted
+    assert "two-body" not in render.render_flow(1, 1, f, note="driven by 3 tests")
+    entered = flow([node("e")], [], changed=[node("c", "body")], entry=node("e"))
+    assert render.verdict(entered, "driven by 3 tests") == render.verdict(entered)
 
 
 def test_verdict_truncates_long_name_lists():

@@ -6,6 +6,7 @@ import argparse
 import json
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 
 from . import cli, compare, env, graph, harness_py, lsp, render, worktree
@@ -91,9 +92,18 @@ def run_tests(interpreter: Path, tree: Path, tests: list[str], timeout: float) -
 
 
 def test_delta(interpreter: Path, base: Path, root: Path, tests: list[str], timeout: float) -> list[str]:
+    """One line per test whose outcome matters (anything not passing now, or fixed); the rest as counts."""
     before = run_tests(interpreter, base, tests, timeout)
     after = run_tests(interpreter, root, tests, timeout)
-    return [f"  {t}  {before[t]}→{after[t]}" for t in tests]
+    lines, quiet = [], Counter()
+    for t in tests:
+        if after[t] != "PASS" or before[t] == "FAIL":
+            lines.append(f"  {t}  {before[t]}→{after[t]}")
+        else:
+            quiet[f"{before[t]}→{after[t]}"] += 1
+    if quiet:
+        lines.append("  " + ", ".join(f"{n} {kind}" for kind, n in sorted(quiet.items())))
+    return lines
 
 
 def run(args: argparse.Namespace) -> int:
@@ -128,8 +138,8 @@ def run(args: argparse.Namespace) -> int:
     index: list[dict] = []
     diverged = False
     for i, flow in enumerate(shown, 1):
-        print(render.render_flow(i, len(shown), flow, args.full, args.list_tests))
         if id(flow) not in harnesses:
+            print(render.render_flow(i, len(shown), flow, args.full, args.list_tests))
             print()
             continue
         harness = harnesses[id(flow)]
@@ -139,11 +149,12 @@ def run(args: argparse.Namespace) -> int:
         frames = [harness_py.frame_id(root, f) for f in flow.frames if f.status != "slot"]
         traces = {side: out_dir / f"flow{i}.{side}.jsonl" for side in ("base", "head")}
         shared, changed_tests = shared_tests(base_holder[0], root, flow.tests) if flow.tests else ([], [])
+        note = None
         if harness.complete:
             def drive(side: str, tree: Path) -> str | None:
                 return run_harness(interpreter, harness_path, tree, side, traces[side], args.run_timeout)
         elif shared:
-            print(f"no call site with literal arguments; driven by {len(shared)} covering test(s) present on both sides")
+            note = f"driven by {len(shared)} covering test(s) present on both sides"
             if changed_tests:
                 analysis.warnings.append(f"the driving tests changed in this diff ({', '.join(changed_tests)}); "
                                          "a divergence may reflect the inputs rather than the code")
@@ -151,10 +162,14 @@ def run(args: argparse.Namespace) -> int:
             def drive(side: str, tree: Path) -> str | None:
                 return run_traced_tests(interpreter, tree, shared, frames, side, traces[side], args.run_timeout)
         else:
+            print(render.render_flow(i, len(shown), flow, args.full, args.list_tests))
             print("no call site with literal arguments and no covering test present on both sides; "
                   f"fill the slots in {harness_path} — harness not run")
             cli.render_all(cli.Analysis(root, analysis.revs, [], analysis.warnings), args.full)
             return cli.EXIT_NOTHING
+        print(render.render_flow(i, len(shown), flow, args.full, args.list_tests, note))
+        if note and flow.entry is not None:
+            print(f"no call site with literal arguments; {note}")
         for side, tree in (("base", base_holder[0]), ("head", root)):
             failure = drive(side, tree)
             if failure:

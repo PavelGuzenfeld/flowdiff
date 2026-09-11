@@ -37,6 +37,13 @@ def load_project_summariser(tree: str, scratch: Optional[str] = None) -> None:
     _project = getattr(module, "summarise", None)
 
 
+def relabel(text: str) -> str:
+    for prefix, label in _prefixes:
+        if text.startswith(prefix + os.sep):
+            return label + text[len(prefix):]
+    return text
+
+
 def type_name(value: Any) -> str:
     cls = type(value)
     return cls.__qualname__ if cls.__module__ == "builtins" else cls.__module__ + "." + cls.__qualname__
@@ -69,10 +76,7 @@ def summarise(value: Any, depth: int = 0) -> Any:
     if isinstance(value, float):
         return value if math.isfinite(value) else repr(value)
     if isinstance(value, str):
-        for prefix, label in _prefixes:
-            if value.startswith(prefix + os.sep):
-                value = label + value[len(prefix):]
-                break
+        value = relabel(value)
         return value if len(value) <= INLINE_LIMIT else {"type": "str", "len": len(value),
                                                           "sha256": digest(value.encode("utf-8", "replace"))}
     if isinstance(value, (bytes, bytearray)):
@@ -87,13 +91,15 @@ def summarise(value: Any, depth: int = 0) -> Any:
         return [summarise(v, depth + 1) for v in items] if len(items) <= INLINE_LIMIT else sized(value, items)
     if isinstance(value, dict):
         if len(value) <= INLINE_LIMIT:
-            return {str(k): summarise(v, depth + 1) for k, v in value.items()}
+            return {relabel(str(k)): summarise(v, depth + 1) for k, v in value.items()}
         return sized(value, list(value.values()))
     if hasattr(value, "shape") and hasattr(value, "tobytes") and hasattr(value, "dtype"):
         return array_summary(value)
+    # Private attributes hold handles, pids and caches: implementation state, not behaviour.
     fields = getattr(value, "__dict__", None)
     if isinstance(fields, dict) and len(fields) <= INLINE_LIMIT:
-        return {"type": type_name(value), "fields": {k: summarise(v, depth + 1) for k, v in fields.items()}}
+        return {"type": type_name(value),
+                "fields": {k: summarise(v, depth + 1) for k, v in fields.items() if not k.startswith("_")}}
     return {"type": type_name(value)}
 
 
