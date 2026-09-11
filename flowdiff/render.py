@@ -93,6 +93,19 @@ def render_flow(index: int, total: int, flow: Flow, full: bool = False, list_tes
     return "\n".join(parts)
 
 
+GUTTER = "   │   "
+
+
+def split_view(left: str, right: str, titles: tuple[str, str] = ("base", "head")) -> str:
+    """Two blocks side by side, left column padded to its widest line (decision 37)."""
+    left_lines, right_lines = [titles[0], *left.splitlines()], [titles[1], *right.splitlines()]
+    width = max(len(line) for line in left_lines)
+    rows = max(len(left_lines), len(right_lines))
+    left_lines += [""] * (rows - len(left_lines))
+    right_lines += [""] * (rows - len(right_lines))
+    return "\n".join(f"{a:<{width}}{GUTTER}{b}".rstrip() for a, b in zip(left_lines, right_lines))
+
+
 def render_removed(flows: list[Flow]) -> str:
     names = sorted(f"{n.name}-" for f in flows for n in f.changed)
     shown = ", ".join(names[:MAX_NAMES_IN_VERDICT])

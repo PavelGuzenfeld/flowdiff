@@ -91,6 +91,25 @@ def test_changed_tests_are_covering_tests_not_frames(project: Path, capsys):
     assert "no caller found" not in captured.err
 
 
+def test_split_draws_the_base_revisions_graph_beside_the_heads(project: Path, capsys):
+    changed = BEFORE.replace("def scale(value):\n    return clamp(value, 100) * 2",
+                             "def scale(value):\n    return double(clamp(value, 100))\n\n\ndef double(v):\n    return v * 2")
+    (project / "lib.py").write_text(changed)
+    assert cli.main(["--repo", str(project), "--no-tests", "--split"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("flow 1/1\nbase") and graph_module_gutter() in out
+    paired = [line.split(graph_module_gutter(), 1) for line in out.splitlines() if graph_module_gutter() in line]
+    left, right = [p[0] for p in paired], [p[1] for p in paired]
+    assert any("scale~" in l for l in left) and any("clamp" in l for l in left) and not any("double" in l for l in left)
+    assert any("double+" in r for r in right) and any("scale~" in r for r in right)
+    assert "entry scale  (3 frames, 2 changed: scale~, double+)" in out
+
+
+def graph_module_gutter() -> str:
+    from flowdiff import render
+    return render.GUTTER
+
+
 def test_comment_only_change_reports_nothing_to_show(project: Path, capsys):
     (project / "lib.py").write_text(BEFORE.replace("def scale(value):", "def scale(value):  # a note"))
     assert cli.main(["--repo", str(project), "--no-tests"]) == 2

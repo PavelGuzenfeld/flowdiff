@@ -42,7 +42,7 @@ class FakeClient:
         self.opened.append(path)
 
     def document_symbols(self, path: Path) -> list[Symbol]:
-        return [s for s in self.symbols.values() if s.path == path]
+        return [s for s in self.symbols.values() if s.path.resolve() == path.resolve()]
 
     def prepare_call_hierarchy(self, path: Path, pos: Position) -> list[dict[str, Any]]:
         matches = [s.name for s in self.symbols.values()
@@ -57,6 +57,12 @@ class FakeClient:
 
     def outgoing_calls(self, item: dict[str, Any]) -> list[dict[str, Any]]:
         return [{"to": self._item(c)} for c in self.calls.get(self._name_of(item), [])]
+
+    def close(self) -> None:
+        self.closed = True
+
+    def wait_for_index(self, timeout: float, grace: float = 2.0) -> bool:
+        return True
 
     def workspace_symbols(self, query: str) -> list[Symbol]:
         return [s for s in self.symbols.values() if s.name.rsplit("::", 1)[-1] == query]

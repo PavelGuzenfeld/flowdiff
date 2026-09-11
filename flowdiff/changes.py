@@ -121,6 +121,27 @@ def changed_symbols(client: LspClient, revs: Revisions, hunks: list[Hunk],
     return result
 
 
+def base_symbols(client: LspClient, root: Path, base_tree: Path, changed: list[ChangedSymbol]) -> list[ChangedSymbol]:
+    """The changed symbols as they exist in the base worktree, matched by name and kind in the same file,
+    so a graph can be built around them on that revision (decision 37). Added symbols have no base side."""
+    result: list[ChangedSymbol] = []
+    cache: dict[Path, list[Symbol]] = {}
+    for c in changed:
+        if c.status == "added":
+            continue
+        path = (base_tree / c.symbol.path.resolve().relative_to(root.resolve())).resolve()
+        if path not in cache:
+            if not path.is_file():
+                cache[path] = []
+                continue
+            client.open(path, path.read_text(encoding="utf-8", errors="replace"))
+            cache[path] = client.document_symbols(path)
+        match = next((s for s in cache[path] if (s.name, s.kind) == (c.symbol.name, c.symbol.kind)), None)
+        if match is not None:
+            result.append(ChangedSymbol(match, c.status))
+    return result
+
+
 def classify(head_syms: list[Symbol], base_syms: list[Symbol], hunks: list[Hunk],
              head_text: str, base_text: str, language: str, suffix: str) -> list[ChangedSymbol]:
     base_by_key = {(s.name, s.kind): s for s in base_syms}

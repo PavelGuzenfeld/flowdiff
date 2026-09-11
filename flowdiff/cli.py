@@ -27,6 +27,8 @@ class Analysis:
     flows: list[graph.Flow] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     container: container.Container | None = None
+    # The same flows on the base revision, by position, when --split asked for them (decision 37).
+    base_flows: list[graph.Flow] = field(default_factory=list)
 
 
 Visitor = Callable[[lsp.LspClient, graph.Graph, list[graph.Flow], Analysis], None]
@@ -39,6 +41,7 @@ def add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--no-tests", action="store_true")
     parser.add_argument("--list-tests", action="store_true", help="name the covering tests, not only their count")
     parser.add_argument("--full", action="store_true", help="draw the graph even when it is large")
+    parser.add_argument("--split", action="store_true", help="draw the base revision's graph beside the head's")
     parser.add_argument("--timeout", type=float, default=60.0, help="language server request timeout")
     parser.add_argument("--image", help="the project's dev image for C++ (default: <repo>:dev when it exists)")
     parser.add_argument("--build-timeout", type=float, default=1800.0, help="seconds for a build inside the container")
@@ -151,6 +154,8 @@ def analyse(args: argparse.Namespace, visit: Visitor | None = None) -> Analysis 
                 visit(client, g, flows, analysis)
             analysis.flows += flows
             analysis.warnings += g.warnings
+            if args.split:
+                analysis.base_flows += base_side(analysis, config, changed, flows, args)
         except lsp.LspError as err:
             print(f"language server: {err}", file=sys.stderr)
             return EXIT_TOOL_ERROR
@@ -163,10 +168,50 @@ def analyse(args: argparse.Namespace, visit: Visitor | None = None) -> Analysis 
     return analysis
 
 
+def base_side(analysis: Analysis, config: lsp.ServerConfig, changed: list[changes.ChangedSymbol],
+              flows: list[graph.Flow], args: argparse.Namespace) -> list[graph.Flow]:
+    """The head flows rebuilt on the base worktree with a server rooted there, one per head flow by position."""
+    from . import worktree
+    base = worktree.base_worktree(analysis.root, analysis.revs.base)
+    if analysis.container is not None:
+        failure = container.build(analysis.container, base, args.build_timeout)
+        if failure:
+            analysis.warnings.append(f"base graph skipped: {failure.splitlines()[0]}")
+            return []
+    sample = next(iter(config.extensions))
+    base_config = lsp.server_for(Path(f"x{sample}"), base, analysis.container)
+    if base_config is None:
+        return []
+    client = lsp.LspClient(base_config, base, timeout=args.timeout)
+    try:
+        base_changed = changes.base_symbols(client, analysis.root, base, changed)
+        if not base_changed:
+            return []
+        if config.language_id == "cpp":
+            client.wait_for_index(args.build_timeout)
+        g = graph.build_graph(client, base_changed, args.hops)
+        base_flows = graph.flows(client, g, base_changed, args.hops, False)
+    finally:
+        client.close()
+    by_name = {frozenset(n.name for n in f.changed): f for f in base_flows}
+    return [by_name.get(frozenset(n.name for n in f.changed if n.status != "added"),
+                        graph.Flow([], None, [], [], True, [], f.language)) for f in flows]
+
+
 def render_all(analysis: Analysis, full: bool, list_tests: bool = False) -> None:
     shown = [f for f in analysis.flows if not f.removed_only]
+    bases = [b for f, b in zip(analysis.flows, analysis.base_flows) if not f.removed_only]
     for i, flow in enumerate(shown, 1):
-        print(render.render_flow(i, len(shown), flow, full, list_tests))
+        if i <= len(bases):
+            base = bases[i - 1]
+            left = render.render_graph(base) if base.frames else "(not in the base revision)"
+            print(f"flow {i}/{len(shown)}")
+            print(render.split_view(left, render.render_graph(flow)))
+            print(render.verdict(flow))
+            if list_tests and flow.tests:
+                print("\n".join(f"  {t}" for t in flow.tests))
+        else:
+            print(render.render_flow(i, len(shown), flow, full, list_tests))
         if i < len(shown):
             print()
     removed = [f for f in analysis.flows if f.removed_only]

@@ -20,7 +20,8 @@ dev image with clangd and gdb layered on top, so nothing has to be installed on 
 
 `flowdiff` reads the working tree against HEAD; `flowdiff <ref>` reads HEAD against `<ref>`. Exit 0
 rendered or ran, 1 the tool itself failed, 2 nothing to show or nothing could drive the flow, 3
-values diverged under `--fail-on-diff`.
+values diverged under `--fail-on-diff`. `--split` draws the base revision's graph beside the head's,
+from a second language-server session rooted at the base worktree.
 
 ## A Python flow, on this repository's own history
 
