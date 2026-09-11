@@ -63,6 +63,13 @@ def test_clean_tree_is_exit_2(tools_present, repo: Path, capsys):
     assert "no changes" in out and "working tree" in out
 
 
+def test_unknown_ref_is_exit_1_with_gits_reason(tools_present, repo: Path, capsys):
+    assert cli.main(["--repo", str(repo), "origin/main"]) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("git diff origin/main: ambiguous argument 'origin/main': unknown revision")
+    assert "Traceback" not in err and "git <command>" not in err
+
+
 def test_clean_tree_against_a_ref_names_both_revisions(tools_present, repo: Path, capsys):
     assert cli.main(["--repo", str(repo), "HEAD"]) == 2
     out = capsys.readouterr().out
@@ -205,6 +212,10 @@ def test_analyse_builds_in_the_container_for_cpp_hunks_and_reports_detection_fai
     assert "building the working tree in flowdiff/repo:dev" in capsys.readouterr().err
     monkeypatch.setattr(container, "build", lambda c, tree, timeout: "meson setup failed")
     assert cli.analyse(args) == 1 and "meson setup failed" in capsys.readouterr().err
+    no_build = cli.build_parser().parse_args(["--repo", str(repo), "--no-tests", "--no-build"])
+    assert isinstance(cli.analyse(no_build), cli.Analysis) and "building" not in capsys.readouterr().err
+    monkeypatch.setattr(container, "detect", lambda root, image: None)
+    assert isinstance(cli.analyse(args), cli.Analysis) and "building" not in capsys.readouterr().err
 
     def refuse(root, image):
         raise container.ContainerError("no dev image for repo")

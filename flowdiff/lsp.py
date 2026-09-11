@@ -115,16 +115,15 @@ PYTHON_EXTENSIONS = frozenset({".py"})
 
 
 def find_compile_db(root: Path) -> Path | None:
-    candidates = [root, *sorted(root.glob("build*"))]
-    found = [d / "compile_commands.json" for d in candidates if (d / "compile_commands.json").is_file()]
-    return max(found, key=lambda p: p.stat().st_mtime) if found else None
+    from .container import compile_database
+    return compile_database(root)
 
 
 def server_for(path: Path, root: Path, container: Any = None) -> ServerConfig | None:
     suffix = path.suffix
     if suffix in CPP_EXTENSIONS:
         if container is not None:
-            return ServerConfig("cpp", "clangd", ("--background-index", f"--compile-commands-dir={container.workdir}/builddir"),
+            return ServerConfig("cpp", "clangd", ("--background-index", f"--compile-commands-dir={container.compile_commands_dir}"),
                                 CPP_EXTENSIONS, "cpp",
                                 command_prefix=tuple(container.clangd_command(root, root / ".flowdiff")),
                                 uri_map=(uri_of(root), "file://" + container.workdir))
