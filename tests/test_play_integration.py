@@ -1,5 +1,8 @@
 """End-to-end play and show: real git worktree, real pyright, the project's own interpreter."""
+import os
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -122,6 +125,18 @@ def test_play_drives_the_flow_from_a_caller_when_the_entry_has_no_literal_site(p
     assert "1 of 2 frames differ: scale (return); origin scale" in captured.out
     assert "warning: scale: driven from entry, the nearest caller with a literal call site" in captured.err
     assert "lib.entry(3)" in (project / ".flowdiff" / "run" / "flow1.py").read_text()
+
+
+def test_keep_after_play_writes_a_passing_pytest_file(played: Path, capsys):
+    assert cli.main(["play", "--repo", str(played), "--no-tests"]) == 0
+    capsys.readouterr()
+    assert cli.main(["keep", "--repo", str(played)]) == 0
+    assert "tests/flow_scale.py: 1 case(s), pytest dialect" in capsys.readouterr().out
+    written = played / "tests" / "flow_scale.py"
+    assert "assert lib.scale(4) == 12" in written.read_text()
+    proc = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", str(written)],
+                          cwd=played, capture_output=True, text=True, env={**os.environ, "PYTHONPATH": str(played)})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
 def test_play_reuses_the_base_worktree_and_clean_base_rebuilds_it(played: Path, capsys):

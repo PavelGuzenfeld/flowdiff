@@ -39,6 +39,7 @@ class Harness:
     source: str
     complete: bool
     warnings: tuple[str, ...] = ()
+    driver: str | None = None
 
 
 def module_name(root: Path, path: Path) -> str:
@@ -171,7 +172,8 @@ def build(client: LspClient, root: Path, base: Path, flow: Flow, g: Graph) -> Ha
     imports = f"import {module_name(root, driver.path)}\n"
     warnings = () if driver is flow.entry else \
         (f"{flow.entry.name}: driven from {driver.name}, the nearest caller with a literal call site",)
-    return Harness(HARNESS.format(imports=imports, frames=frames, body=f"    {line}"), complete, warnings)
+    return Harness(HARNESS.format(imports=imports, frames=frames, body=f"    {line}"), complete, warnings,
+                   frame_id(root, driver) if complete else None)
 
 
 def two_body(client: LspClient, root: Path, base: Path, flow: Flow, frames: list[str]) -> Harness:

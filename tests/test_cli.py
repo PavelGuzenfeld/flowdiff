@@ -26,6 +26,10 @@ def test_verbs_dispatch_to_play_with_their_own_parsers(monkeypatch):
     assert (seen["play"].depth, seen["play"].fail_on_diff, seen["play"].clean_base) == (2, True, True)
     assert cli.main(["show", "scale/return"]) == 8
     assert seen["show"].frame == "scale/return"
+    from flowdiff import keep
+    monkeypatch.setattr(keep, "run", lambda args: seen.setdefault("keep", args) and 9)
+    assert cli.main(["keep"]) == 9 and seen["keep"].frame is None
+    assert cli.build_keep_parser().parse_args(["scale"]).frame == "scale"
 
 
 def test_play_parser_defaults():

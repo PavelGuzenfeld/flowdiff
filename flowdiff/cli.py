@@ -17,7 +17,7 @@ EXIT_OK, EXIT_TOOL_ERROR, EXIT_NOTHING, EXIT_DIFF = 0, 1, 2, 3
 REQUIRED_BINARIES = {"git": "apt install git", "ast-grep": "cargo install ast-grep or a release binary",
                      "graph-easy": "apt install libgraph-easy-perl"}
 SERVER_HINTS = {"clangd": "apt install clangd", "pyright-langserver": "npm install -g pyright"}
-VERBS = ("play", "show")
+VERBS = ("play", "show", "keep")
 
 Visitor = Callable[[lsp.LspClient, graph.Graph, list[graph.Flow]], None]
 
@@ -60,6 +60,14 @@ def build_play_parser() -> argparse.ArgumentParser:
 def build_show_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="flowdiff show", description="values recorded by the last play")
     parser.add_argument("frame", help="frame, frame/leaf.path, frame#N for one call whole, frame#N/leaf.path")
+    parser.add_argument("--repo", type=Path, default=Path.cwd())
+    return parser
+
+
+def build_keep_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="flowdiff keep",
+                                     description="write tests/flow_<frame>.py from the last play's recorded calls")
+    parser.add_argument("frame", nargs="?", help="frame to keep; default is the frame the harness called")
     parser.add_argument("--repo", type=Path, default=Path.cwd())
     return parser
 
@@ -151,9 +159,11 @@ def render_all(analysis: Analysis, full: bool, list_tests: bool = False) -> None
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv and argv[0] in VERBS:
-        from . import play
+        from . import keep, play
         if argv[0] == "play":
             return play.run(build_play_parser().parse_args(argv[1:]))
+        if argv[0] == "keep":
+            return keep.run(build_keep_parser().parse_args(argv[1:]))
         return play.show(build_show_parser().parse_args(argv[1:]))
     args = build_parser().parse_args(argv)
     analysis = analyse(args)
