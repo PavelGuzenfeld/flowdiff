@@ -183,7 +183,8 @@ def run(args: argparse.Namespace) -> int:
             print(compare.show(report, frame))
         if flow.tests:
             print("\n".join(test_delta(interpreter, base_holder[0], root, flow.tests, args.run_timeout)))
-        index.append({"flow": i, "frames": frames, "base": str(traces["base"]), "head": str(traces["head"])})
+        index.append({"flow": i, "frames": frames, "base": str(traces["base"]), "head": str(traces["head"]),
+                      "driver": harness.driver})
         if i < len(shown):
             print()
     removed = [f for f in analysis.flows if f.removed_only]
