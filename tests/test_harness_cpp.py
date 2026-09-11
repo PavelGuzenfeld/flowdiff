@@ -26,15 +26,19 @@ def write_db(tree: Path, entries: list[dict]) -> None:
 def test_test_executables_follow_meson_outputs_and_require_the_binary(tmp_path: Path):
     build = tmp_path / "builddir"
     write_db(tmp_path, [
-        {"directory": str(build), "file": "../tests/test_a.cpp", "output": "tests/test_a.p/test_a.cpp.o"},
-        {"directory": str(build), "file": "../tests/test_b.cpp", "output": "tests/test_b.p/test_b.cpp.o"},
-        {"directory": str(build), "file": "../gst/x.cpp", "output": "gst/libx.so.p/x.cpp.o"},
-        {"directory": str(build), "file": "../tests/test_c.cpp"},
-        {"directory": "/elsewhere", "file": "tests/test_d.cpp", "output": "tests/test_d.p/test_d.cpp.o"}])
+        {"directory": "/src/builddir", "file": "../tests/test_a.cpp", "output": "tests/test_a.p/test_a.cpp.o"},
+        {"directory": "/src/builddir", "file": "../tests/test_b.cpp", "output": "tests/test_b.p/test_b.cpp.o"},
+        {"directory": "/src/builddir", "file": "../gst/x.cpp", "output": "gst/libx.so.p/x.cpp.o"},
+        {"directory": "/src/builddir", "file": "../tests/test_c.cpp"},
+        {"directory": "/src/builddir", "file": "/src/tests/test_d.cpp", "output": "tests/test_d.p/test_d.cpp.o"},
+        {"directory": "/src/builddir", "file": "/elsewhere/test_e.cpp", "output": "tests/test_e.p/test_e.cpp.o"}])
     (build / "tests").mkdir()
-    (build / "tests" / "test_a").write_text("")
-    found = harness_cpp.test_executables(tmp_path, ["tests/test_a.cpp", "tests/test_b.cpp", "tests/test_c.cpp", "tests/test_d.cpp"])
-    assert found == {"tests/test_a.cpp": "builddir/tests/test_a"}
+    for exe in ("test_a", "test_d", "test_e"):
+        (build / "tests" / exe).write_text("")
+    wanted = ["tests/test_a.cpp", "tests/test_b.cpp", "tests/test_c.cpp", "tests/test_d.cpp", "test_e.cpp"]
+    assert harness_cpp.test_executables(tmp_path, wanted, "/src") == {
+        "tests/test_a.cpp": "builddir/tests/test_a", "tests/test_d.cpp": "builddir/tests/test_d"}
+    assert harness_cpp.test_executables(tmp_path, wanted) == {"tests/test_a.cpp": "builddir/tests/test_a"}
     assert harness_cpp.test_executables(tmp_path / "nowhere", ["tests/test_a.cpp"]) == {}
     (build / "compile_commands.json").write_text("nonsense")
     assert harness_cpp.compile_db(tmp_path) == []
@@ -73,6 +77,7 @@ def test_gdb_script_embeds_frames_tests_and_paths_and_is_valid_python():
     text = trace_gdb.script("/src", {"gst/t.cpp:f": "f"}, {"test_f": "tests/t.cpp::test_f"}, "/src/.flowdiff/run/x.jsonl")
     assert "TREE = '/src'" in text and "'gst/t.cpp:f': 'f'" in text and "'test_f': 'tests/t.cpp::test_f'" in text
     assert "OUT = open('/src/.flowdiff/run/x.jsonl'" in text and "set breakpoint pending on" in text
+    assert 'key.split(":", 1)[0]' in text
     compile(text, "trace.py", "exec")
     assert trace_gdb.gdb_command("/s.py", "/src/builddir/t", ["--x"]) == ["gdb", "-batch", "-q", "-nx", "-x", "/s.py", "--args", "/src/builddir/t", "--x"]
     assert trace_gdb.read_records('noise\n{"seq": 1}\n[x]\n{"seq": 2}\n') == [{"seq": 1}, {"seq": 2}]

@@ -153,7 +153,7 @@ def cpp_plan(ctr: container.Container, flow: graph.Flow, root: Path, base: Path,
     frames = [harness_cpp.frame_id(root, f) for f in flow.frames if f.status != "slot"]
     plan = Plan(frames)
     test_files = sorted({t.split("::")[0] for t in flow.tests})
-    head_exes = harness_cpp.test_executables(root, test_files)
+    head_exes = harness_cpp.test_executables(root, test_files, ctr.workdir)
     if not head_exes:
         plan.stop = ("no built test executable reaches this flow; C++ flows are driven by their covering tests "
                      "and the literal harness is not available yet")
@@ -175,7 +175,7 @@ def cpp_plan(ctr: container.Container, flow: graph.Flow, root: Path, base: Path,
         failure = ensure_built(tree)
         if failure:
             return failure
-        exes = harness_cpp.test_executables(tree, test_files)
+        exes = harness_cpp.test_executables(tree, test_files, ctr.workdir)
         shared = [exes[f] for f in test_files if f in exes and f in head_exes]
         if not shared:
             return f"{side}: none of the covering test executables exist on this side"

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
 from pathlib import Path
 
 from . import container, trace_gdb, worktree
@@ -26,7 +25,18 @@ def compile_db(tree: Path) -> list[dict]:
         return []
 
 
-def test_executables(tree: Path, test_files: list[str]) -> dict[str, str]:
+def source_of(tree: Path, entry: dict, workdir: str | None) -> Path:
+    """The entry's source as a host path. The database was written inside the container, so its
+    directory names the mount; relative files resolve against the tree's own build dir instead."""
+    file = Path(entry["file"])
+    if not file.is_absolute():
+        return (tree / BUILD_DIR / file).resolve()
+    if workdir and file.as_posix().startswith(workdir + "/"):
+        return (tree / file.as_posix()[len(workdir) + 1:]).resolve()
+    return file.resolve()
+
+
+def test_executables(tree: Path, test_files: list[str], workdir: str | None = None) -> dict[str, str]:
     """test file (tree-relative) -> executable (tree-relative), through the compile database's outputs.
 
     Meson writes objects under <target>.p/, so the executable is the .p directory's parent path
@@ -34,7 +44,7 @@ def test_executables(tree: Path, test_files: list[str]) -> dict[str, str]:
     build = tree / BUILD_DIR
     found: dict[str, str] = {}
     for entry in compile_db(tree):
-        source = (Path(entry.get("directory", str(build))) / entry["file"]).resolve()
+        source = source_of(tree, entry, workdir)
         output = entry.get("output", "")
         try:
             rel = source.relative_to(tree.resolve()).as_posix()
@@ -85,18 +95,6 @@ def split_arguments(text: str) -> list[str] | None:
     if depth != 0:
         return None
     return [a for a in out + [current] if a.strip()] if (out or current.strip()) else []
-
-
-@dataclass(frozen=True)
-class TestRun:
-    """One test executable, run under gdb on one side with the flow's frames instrumented."""
-    ctr: container.Container
-    executable: str
-    frames: dict[str, str]
-    tests: dict[str, str]
-
-    def script(self, tree: Path, out_rel: str) -> str:
-        return trace_gdb.script(self.ctr.workdir, self.frames, self.tests, f"{self.ctr.workdir}/{out_rel}")
 
 
 def gdb_frames(root: Path, flow: Flow) -> dict[str, str]:

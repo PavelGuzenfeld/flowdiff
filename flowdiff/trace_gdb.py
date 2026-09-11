@@ -90,16 +90,6 @@ def summarise(v, depth=0):
         return {"type": "unreadable", "error": str(exc)[:80]}
 
 
-def frame_key(frame):
-    sal = frame.find_sal()
-    if sal.symtab is None:
-        return None
-    path = os.path.realpath(sal.symtab.fullname())
-    if not path.startswith(TREE + os.sep):
-        return None
-    return os.path.relpath(path, TREE) + ":" + FRAMES_BY_FUNCTION.get(frame.name(), frame.name() or "")
-
-
 class Exit(gdb.FinishBreakpoint):
     def __init__(self, frame, key):
         super().__init__(frame, internal=True)
@@ -152,10 +142,8 @@ class TestStart(gdb.Breakpoint):
 
 
 gdb.execute("set breakpoint pending on")   # the frames live in shared libraries not loaded before run
-FRAMES_BY_FUNCTION = {}
 for key, function in FRAMES.items():
-    source = key.rsplit(":", 1)[0]
-    FRAMES_BY_FUNCTION[function] = function
+    source = key.split(":", 1)[0]          # C++ names carry ::, so split at the path's colon
     try:
         Enter("-source %%s -function %%s" %% (os.path.basename(source), function), key)
     except gdb.error as exc:

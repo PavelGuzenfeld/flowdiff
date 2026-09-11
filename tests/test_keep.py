@@ -79,6 +79,70 @@ def test_emit_unittest_and_plain_dialects():
     assert compile(keep.emit("lib", "snake_name", found, "pytest"), "t", "exec")
 
 
+def test_cpp_dialect_detection_order(tmp_path: Path):
+    tests = tmp_path / "tests"
+    assert keep.detect_cpp_dialect(tests) == ("plain", "#include <cassert>")
+    tests.mkdir()
+    (tests / "t_doc.cpp").write_text('#include "doctest.h"\n')
+    assert keep.detect_cpp_dialect(tests) == ("doctest", "#include <doctest/doctest.h>")
+    (tests / "t_catch.cpp").write_text("#include <catch2/catch_test_macros.hpp>\n")
+    assert keep.detect_cpp_dialect(tests)[0] == "catch2"
+    (tests / "t_g.cpp").write_text("#include <gtest/gtest.h>\n")
+    assert keep.detect_cpp_dialect(tests) == ("gtest", "#include <gtest/gtest.h>")
+    (tests / "t_local.cpp").write_text('#include "harness/test_harness.h"\nTEST(x) {}\n')
+    assert keep.detect_cpp_dialect(tests) == ("harness", '#include "harness/test_harness.h"')
+
+
+def test_cpp_literals_and_cases():
+    assert [keep.cpp_literal(v) for v in (True, 3, 2.5, "s", None)] == ["true", "3", "2.5", '"s"', "nullptr"]
+    assert keep.cpp_literal({"type": "T", "fields": {}}) is None and keep.cpp_literal([1]) is None
+    calls = [compare.Call(1, {"x": 4, "y": True}, {"type": "R", "fields": {"ok": True, "code": 0, "detail": {"type": "P"}}}, end=2),
+             compare.Call(3, {"x": 4, "y": True}, {"type": "R", "fields": {"ok": True, "code": 0}}, end=4),
+             compare.Call(5, {"x": 7}, 9, end=6),
+             compare.Call(7, {"x": {"type": "Obj", "fields": {}}}, 1, end=8),
+             compare.Call(9, {"x": 1}, {"type": "Opaque"}, end=10),
+             compare.Call(11, {"x": 1}, raises="unwound", end=12)]
+    assert keep.cpp_cases("ns::f", calls) == [
+        ("ns::f(4, true)", [(".ok", "true"), (".code", "0")]), ("ns::f(7)", [("", "9")])]
+
+
+def test_emit_cpp_in_the_local_harness_dialect_and_plain():
+    found = [("ns::f(4, true)", [(".ok", "true"), (".code", "0")]), ("ns::f(7)", [("", "9")])]
+    text = keep.emit_cpp("f.hpp", "ns::f", found, "harness", '#include "test_harness.h"')
+    assert text.splitlines()[:3] == ["// Golden flow test written by flowdiff keep; rerun keep after a deliberate behaviour change.",
+                                     '#include "f.hpp"', '#include "test_harness.h"']
+    assert "TEST(flow_f_1) {\n    auto result = ns::f(4, true);\n    ASSERT_EQ(result.ok, true);\n    ASSERT_EQ(result.code, 0);\n}" in text
+    assert "TEST(flow_f_2) {\n    auto result = ns::f(7);\n    ASSERT_EQ(result, 9);\n}" in text
+    plain = keep.emit_cpp("f.hpp", "ns::f", found[1:], "plain", "#include <cassert>")
+    assert "static void flow_f_1() {\n    auto result = ns::f(7);\n    assert(result == 9);\n}" in plain
+    assert plain.rstrip().endswith("int main() {\n    flow_f_1();\n    return 0;\n}")
+    gtest = keep.emit_cpp("f.hpp", "ns::f", found[1:], "gtest", "#include <gtest/gtest.h>")
+    assert "TEST(FlowKeep, flow_f_1) {" in gtest and "EXPECT_EQ(result, 9);" in gtest
+
+
+def test_keep_writes_a_cpp_test_from_gdb_traces(repo: Path, capsys):
+    run = repo / ".flowdiff" / "run"
+    run.mkdir(parents=True)
+    (repo / "gst").mkdir()
+    (repo / "gst" / "t.cpp").write_text("")
+    (repo / "gst" / "t.hpp").write_text("")
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_x.cpp").write_text('#include "test_harness.h"\n')
+    (run / "h.jsonl").write_text("".join(json.dumps(r) + "\n" for r in [
+        {"seq": 1, "event": "enter", "frame": "gst/t.cpp:ns::scale", "args": {"v": 4}},
+        {"seq": 2, "event": "exit", "frame": "gst/t.cpp:ns::scale", "return": {"type": "R", "fields": {"ok": True}}}]))
+    (run / "index.json").write_text(json.dumps([{"flow": 1, "frames": ["gst/t.cpp:ns::scale"], "base": str(run / "b.jsonl"),
+                                                 "head": str(run / "h.jsonl"), "driver": None}]))
+    assert cli.main(["keep", "scale", "--repo", str(repo)]) == 0
+    assert capsys.readouterr().out == "tests/flow_scale.cpp: 1 case(s), harness dialect; add it to the build to run it\n"
+    written = (repo / "tests" / "flow_scale.cpp").read_text()
+    assert '#include "t.hpp"' in written and "ASSERT_EQ(result.ok, true);" in written
+    (run / "h.jsonl").write_text(json.dumps({"seq": 1, "event": "enter", "frame": "gst/t.cpp:ns::scale",
+                                             "args": {"v": {"type": "Buf", "fields": {}}}}) + "\n")
+    assert cli.main(["keep", "scale", "--repo", str(repo)]) == 2
+    assert "no recorded call has scalar arguments" in capsys.readouterr().err
+
+
 def recorded(repo: Path, driver: str | None) -> None:
     run = repo / ".flowdiff" / "run"
     run.mkdir(parents=True)

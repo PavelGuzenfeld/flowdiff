@@ -280,7 +280,10 @@ def test_describe_and_show_use_brief_values_but_a_named_argument_is_whole():
 
 
 def test_resolve_accepts_the_short_name_or_the_full_frame():
-    r = report({}, {}, frames=("lib.py:f", "pkg/m.py:f", "lib.py:g"))
+    r = report({}, {}, frames=("lib.py:f", "pkg/m.py:f", "lib.py:g", "gst/t.cpp:Nvmm::Transform::crop"))
     assert compare.resolve(r, "f") == ["lib.py:f", "pkg/m.py:f"]
     assert compare.resolve(r, "lib.py:g") == ["lib.py:g"] and compare.resolve(r, "nope") == []
     assert compare.short("pkg/m.py:f") == "f" and compare.short("f") == "f"
+    assert compare.short("gst/t.cpp:Nvmm::Transform::crop") == "Nvmm::Transform::crop"
+    assert compare.resolve(r, "crop") == compare.resolve(r, "Nvmm::Transform::crop") == ["gst/t.cpp:Nvmm::Transform::crop"]
+    assert compare.resolve(r, "Transform::crop") == []
