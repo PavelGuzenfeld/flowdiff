@@ -61,6 +61,54 @@ def test_call_hierarchy_roundtrip(client: LspClient, tmp_path: Path):
     assert client.outgoing_calls(items[0]) == []
 
 
+def test_outgoing_calls_unsupported_by_the_server_is_an_empty_list_asked_once(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("FAKE_NO_OUTGOING", "1")
+    c = LspClient(fake_config(), tmp_path, timeout=5)
+    try:
+        path = tmp_path / "m.py"
+        c.open(path, "")
+        items = c.prepare_call_hierarchy(path, Position(1, 8))
+        assert c.outgoing_calls(items[0]) == [] and c.unsupported == {"callHierarchy/outgoingCalls"}
+        before = c._next_id
+        assert c.outgoing_calls(items[0]) == [] and c._next_id == before
+        assert c.incoming_calls(items[0])
+    finally:
+        c.close()
+
+
+def test_wait_for_index_returns_at_once_when_the_server_reports_no_progress(client: LspClient):
+    assert client.wait_for_index(timeout=5, grace=0.2) is True
+
+
+def test_wait_for_index_blocks_until_the_background_index_ends(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("FAKE_INDEXING", "1")
+    c = LspClient(fake_config(), tmp_path, timeout=5)
+    try:
+        assert c.wait_for_index(timeout=0.3) is False
+        c.request("test/indexed", None)
+        assert c.wait_for_index(timeout=5) is True
+    finally:
+        c.close()
+
+
+def test_a_method_not_found_error_is_its_own_exception(client: LspClient):
+    with pytest.raises(lsp.LspUnsupported):
+        client.request("test/unsupported", None)
+    assert lsp.METHOD_NOT_FOUND == -32601
+
+
+def test_container_config_prefixes_the_command_and_rewrites_uris_both_ways():
+    cfg = lsp.ServerConfig("cpp", "clangd", ("--x",), lsp.CPP_EXTENSIONS, "cpp",
+                           command_prefix=("docker", "run", "--rm", "-i", "img"),
+                           uri_map=("file:///home/me/proj", "file:///src"))
+    assert cfg.command == ["docker", "run", "--rm", "-i", "img", "clangd", "--x"]
+    assert cfg.to_server('{"uri": "file:///home/me/proj/a.cpp"}') == '{"uri": "file:///src/a.cpp"}'
+    assert cfg.from_server('{"uri": "file:///src/a.cpp", "o": "file:///usr/include/x.h"}') \
+        == '{"uri": "file:///home/me/proj/a.cpp", "o": "file:///usr/include/x.h"}'
+    plain = lsp.ServerConfig("cpp", "clangd", (), lsp.CPP_EXTENSIONS, "cpp")
+    assert plain.to_server("x") == "x" and plain.from_server("y") == "y" and plain.command == ["clangd"]
+
+
 def test_references_and_definition_locations(client: LspClient, tmp_path: Path):
     path = tmp_path / "m.py"
     client.open(path, "")

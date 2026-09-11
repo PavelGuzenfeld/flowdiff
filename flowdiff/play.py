@@ -110,7 +110,7 @@ def run(args: argparse.Namespace) -> int:
     harnesses: dict[int, harness_py.Harness] = {}
     base_holder: list[Path] = []
 
-    def visit(client: lsp.LspClient, g: graph.Graph, flows: list[graph.Flow]) -> None:
+    def visit(client: lsp.LspClient, g: graph.Graph, flows: list[graph.Flow], analysis: cli.Analysis) -> None:
         if client.config.language_id != "python":
             return
         root = client.root

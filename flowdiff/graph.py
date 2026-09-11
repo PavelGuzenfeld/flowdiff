@@ -115,6 +115,8 @@ def build_graph(client: LspClient, changed: list[ChangedSymbol], hops: int) -> G
             frontier.append((dst.id, depth + 1))
 
     add_hint_edges(client, g)
+    if "callHierarchy/outgoingCalls" in getattr(client, "unsupported", ()):
+        g.warnings.append(f"{client.config.binary} has no callHierarchy/outgoingCalls; callees are not drawn")
     for c in changed:
         if c.symbol.is_function and not c.symbol.nested and c.status != "removed" and not g.callers(c.symbol.id):
             g.warnings.append(f"{c.symbol.name}: no caller found — add a hint rule?")

@@ -11,15 +11,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from . import changes, graph, lsp, render
+from . import changes, container, graph, lsp, render
 
 EXIT_OK, EXIT_TOOL_ERROR, EXIT_NOTHING, EXIT_DIFF = 0, 1, 2, 3
 REQUIRED_BINARIES = {"git": "apt install git", "ast-grep": "cargo install ast-grep or a release binary",
                      "graph-easy": "apt install libgraph-easy-perl"}
 SERVER_HINTS = {"clangd": "apt install clangd", "pyright-langserver": "npm install -g pyright"}
 VERBS = ("play", "show", "keep")
-
-Visitor = Callable[[lsp.LspClient, graph.Graph, list[graph.Flow]], None]
 
 
 @dataclass
@@ -28,6 +26,10 @@ class Analysis:
     revs: changes.Revisions
     flows: list[graph.Flow] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    container: container.Container | None = None
+
+
+Visitor = Callable[[lsp.LspClient, graph.Graph, list[graph.Flow], Analysis], None]
 
 
 def add_common(parser: argparse.ArgumentParser) -> None:
@@ -38,6 +40,8 @@ def add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--list-tests", action="store_true", help="name the covering tests, not only their count")
     parser.add_argument("--full", action="store_true", help="draw the graph even when it is large")
     parser.add_argument("--timeout", type=float, default=60.0, help="language server request timeout")
+    parser.add_argument("--image", help="the project's dev image for C++ (default: <repo>:dev when it exists)")
+    parser.add_argument("--build-timeout", type=float, default=1800.0, help="seconds for a build inside the container")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -103,31 +107,47 @@ def analyse(args: argparse.Namespace, visit: Visitor | None = None) -> Analysis 
 
     # A changed test is a covering test (decision 39), never a frame: pytest is its only caller.
     source_hunks = [h for h in hunks if not graph.is_test_path(root / h.path, root)]
+    ctr = None
+    if any(h.path.suffix in lsp.CPP_EXTENSIONS for h in source_hunks):
+        try:
+            ctr = container.detect(root, args.image)
+            if ctr is not None:
+                print(f"building the working tree in {ctr.image}", file=sys.stderr)
+                failure = container.build(ctr, root, args.build_timeout)
+                if failure:
+                    print(failure, file=sys.stderr)
+                    return EXIT_TOOL_ERROR
+        except container.ContainerError as err:
+            print(f"container: {err}", file=sys.stderr)
+            return EXIT_TOOL_ERROR
     by_server: dict[lsp.ServerConfig, list[changes.Hunk]] = {}
     for h in source_hunks:
-        config = lsp.server_for(h.path, root)
+        config = lsp.server_for(h.path, root, ctr)
         if config is not None:
             by_server.setdefault(config, []).append(h)
     if not by_server:
         print("only test files changed" if not source_hunks else "no changed files in a supported language")
         return EXIT_NOTHING
 
-    unavailable = [f"{c.binary}: {SERVER_HINTS[c.binary]}" for c in by_server if shutil.which(c.binary) is None]
+    unavailable = [f"{c.binary}: {SERVER_HINTS[c.binary]}" for c in by_server
+                   if not c.command_prefix and shutil.which(c.binary) is None]
     if unavailable:
         print("missing language servers:\n  " + "\n  ".join(unavailable), file=sys.stderr)
         return EXIT_TOOL_ERROR
 
-    analysis = Analysis(root, revs)
+    analysis = Analysis(root, revs, container=ctr)
     for config, server_hunks in by_server.items():
         client = lsp.LspClient(config, root, timeout=args.timeout)
         try:
+            if config.language_id == "cpp" and not client.wait_for_index(args.build_timeout):
+                analysis.warnings.append("clangd was still indexing when asked; callers and tests may be incomplete")
             changed = changes.changed_symbols(client, revs, server_hunks, config.ast_grep_language)
             if not changed:
                 continue
             g = graph.build_graph(client, changed, args.hops)
             flows = graph.flows(client, g, changed, args.hops, not args.no_tests)
             if visit is not None:
-                visit(client, g, flows)
+                visit(client, g, flows, analysis)
             analysis.flows += flows
             analysis.warnings += g.warnings
         except lsp.LspError as err:
