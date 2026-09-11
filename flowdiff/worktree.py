@@ -17,8 +17,13 @@ def scratch_dir(root: Path) -> Path:
     return scratch
 
 
-def base_worktree(root: Path, ref: str, clean: bool = False) -> Path:
-    base = scratch_dir(root) / "base"
+def head_worktree(root: Path, ref: str) -> Path:
+    """The head of an A..B range, checked out under a directory named like the project so image conventions hold."""
+    return base_worktree(root, ref, name=f"head/{root.name}")
+
+
+def base_worktree(root: Path, ref: str, clean: bool = False, name: str = "base") -> Path:
+    base = scratch_dir(root) / name
     # Resolve in the main repo: HEAD inside the base worktree is the base's own HEAD.
     sha = git(root, "rev-parse", "--verify", f"{ref}^{{commit}}").strip()
     if clean and base.exists():
