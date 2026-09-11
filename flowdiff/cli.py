@@ -7,7 +7,7 @@ import argparse
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable
 
@@ -121,6 +121,8 @@ def analyse(args: argparse.Namespace, visit: Visitor | None = None) -> Analysis 
     if any(h.path.suffix in lsp.CPP_EXTENSIONS for h in source_hunks):
         try:
             ctr = container.detect(root, args.image)
+            if ctr is not None:
+                ctr = replace(ctr, packages=container.packages_of(root, [h.path for h in source_hunks]))
             if ctr is not None and not args.no_build:
                 print(f"building the working tree in {ctr.image}", file=sys.stderr)
                 failure = container.build(ctr, root, args.build_timeout)

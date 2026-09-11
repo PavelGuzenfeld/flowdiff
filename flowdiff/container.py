@@ -10,6 +10,8 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterable
+from xml.etree import ElementTree
 
 LAYER_LABEL = "flowdiff.base"
 LAYER_DOCKERFILE = """\
@@ -140,6 +142,8 @@ class Container:
     workdir: str
     # Where clangd finds compile_commands.json inside the container; the meson default when unset.
     db_dir: str = ""
+    # colcon packages holding the changed files; the build stops at them (--packages-up-to) when set.
+    packages: tuple[str, ...] = ()
 
     @property
     def compile_commands_dir(self) -> str:
@@ -214,6 +218,20 @@ def build_system(tree: Path) -> str | None:
     return None
 
 
+def packages_of(tree: Path, files: Iterable[Path]) -> tuple[str, ...]:
+    """Names (from package.xml, not the directory) of the colcon packages holding the given tree-relative files."""
+    names: set[str] = set()
+    for file in files:
+        for parent in Path(file).parents[:-1]:
+            manifest = tree / parent / "package.xml"
+            if manifest.is_file():
+                name = ElementTree.parse(manifest).getroot().findtext("name")
+                if name:
+                    names.add(name.strip())
+                break
+    return tuple(sorted(names))
+
+
 def build(container: Container, tree: Path, timeout: float) -> str | None:
     """Configure once, then the project's own incremental build; the error text on failure, else None."""
     build_dir = tree / BUILD_DIR
@@ -226,7 +244,8 @@ def build(container: Container, tree: Path, timeout: float) -> str | None:
                  else [["cmake", "-S", ".", "-B", BUILD_DIR, "-DCMAKE_BUILD_TYPE=Debug",
                         "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"]]) + [["cmake", "--build", BUILD_DIR]]
     elif system == "colcon":
-        steps = [["colcon", "build", "--symlink-install", "--cmake-args", "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"]]
+        scope = ["--packages-up-to", *container.packages] if container.packages else []
+        steps = [["colcon", "build", "--symlink-install", *scope, "--cmake-args", "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"]]
     else:
         return f"{tree}: no meson.build, CMakeLists.txt or package.xml; no build system to run"
     for step in steps:

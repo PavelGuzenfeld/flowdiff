@@ -191,24 +191,27 @@ def test_base_side_is_empty_without_a_server_or_matching_symbols(monkeypatch, tm
 
 
 def test_analyse_builds_in_the_container_for_cpp_hunks_and_reports_detection_failures(monkeypatch, repo: Path, capsys):
+    from dataclasses import replace
     from flowdiff import container, graph, lsp
     from fake_client import FakeClient, symbol
-    (repo / "a.cpp").write_text("int f(int x) {\n    return x + 1;\n}\n")
-    git(repo, "add", "a.cpp")
+    (repo / "pkg").mkdir()
+    (repo / "pkg" / "package.xml").write_text("<package><name>pkg_lib</name></package>")
+    (repo / "pkg" / "a.cpp").write_text("int f(int x) {\n    return x + 1;\n}\n")
+    git(repo, "add", "pkg")
     git(repo, "commit", "-q", "-m", "cpp")
-    (repo / "a.cpp").write_text("int f(int x) {\n    return x + 2;\n}\n")
+    (repo / "pkg" / "a.cpp").write_text("int f(int x) {\n    return x + 2;\n}\n")
     monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/x")
     ctr = container.Container("flowdiff/repo:dev", "/src")
     monkeypatch.setattr(container, "detect", lambda root, image: ctr)
     built = []
     monkeypatch.setattr(container, "build", lambda c, tree, timeout: built.append((c, tree, timeout)) or None)
-    f = symbol("f", repo / "a.cpp", 0, last=2)
+    f = symbol("f", repo / "pkg" / "a.cpp", 0, last=2)
     monkeypatch.setattr(lsp, "LspClient", lambda cfg, root, timeout: FakeClient(root, {"f": f}, {}, language="cpp"))
     monkeypatch.setattr(changes, "comment_spans", lambda *a: [])
     args = cli.build_parser().parse_args(["--repo", str(repo), "--no-tests"])
     analysis = cli.analyse(args)
-    assert isinstance(analysis, cli.Analysis) and analysis.container is ctr
-    assert built == [(ctr, repo, 1800.0)] and [n.name for fl in analysis.flows for n in fl.changed] == ["f"]
+    assert isinstance(analysis, cli.Analysis) and analysis.container == replace(ctr, packages=("pkg_lib",))
+    assert built == [(analysis.container, repo, 1800.0)] and [n.name for fl in analysis.flows for n in fl.changed] == ["f"]
     assert "building the working tree in flowdiff/repo:dev" in capsys.readouterr().err
     monkeypatch.setattr(container, "build", lambda c, tree, timeout: "meson setup failed")
     assert cli.analyse(args) == 1 and "meson setup failed" in capsys.readouterr().err
