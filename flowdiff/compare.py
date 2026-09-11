@@ -305,7 +305,7 @@ def show_call(report: Report, frame: str, index: int, path: str | None = None) -
         rest = path[len(key):] if path is not None else ""
         bl = dict(flatten(descend(b.get(key, MISSING), rest), path or key))
         hl = dict(flatten(descend(h.get(key, MISSING), rest), path or key))
-        for leaf in list(bl) + [p for p in hl if p not in bl]:
+        for leaf in list(hl) + [p for p in bl if p not in hl]:
             bv, hv = bl.get(leaf, MISSING), hl.get(leaf, MISSING)
             rows.append((leaf, pretty(bv) if bv == hv else f"{pretty(bv)}  →  {pretty(hv)}   *"))
     lines = [f"{frame}  call #{index + 1}{tests_of(report, frame, [index])}"]
