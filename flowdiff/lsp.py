@@ -307,6 +307,12 @@ class LspClient:
             self.unsupported.add("callHierarchy/outgoingCalls")
             return []
 
+    def workspace_symbols(self, query: str) -> list[Symbol]:
+        result = self.request("workspace/symbol", {"query": query}) or []
+        return [Symbol(item["name"], item["kind"], item.get("containerName") or "",
+                       Range.from_lsp(item["location"]["range"]), Range.from_lsp(item["location"]["range"]),
+                       path_of(item["location"]["uri"])) for item in result if "location" in item]
+
     def references(self, path: Path, pos: Position) -> list[Location]:
         result = self.request("textDocument/references", {
             "textDocument": {"uri": uri_of(path)}, "position": pos.to_lsp(),

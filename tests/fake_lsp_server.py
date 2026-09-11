@@ -74,6 +74,10 @@ def handle(msg):
             send({"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": "method not found"}})
         else:
             reply(rid, [])
+    elif method == "workspace/symbol":
+        reply(rid, [{"name": "m", "kind": 6, "containerName": "C",
+                     "location": {"uri": FILE_URI, "range": rng(1, 4, 4, 0)}},
+                    {"name": "other", "kind": 12}])
     elif method == "textDocument/references":
         reply(rid, [{"uri": FILE_URI, "range": rng(8, 4, 8, 5)}])
     elif method == "textDocument/definition":

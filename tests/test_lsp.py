@@ -109,6 +109,13 @@ def test_container_config_prefixes_the_command_and_rewrites_uris_both_ways():
     assert plain.to_server("x") == "x" and plain.from_server("y") == "y" and plain.command == ["clangd"]
 
 
+def test_workspace_symbols_keep_only_located_items(client: LspClient, tmp_path: Path):
+    client.open(tmp_path / "m.py", "")
+    found = client.workspace_symbols("m")
+    assert [(s.name, s.kind, s.detail, s.range.start.line) for s in found] == [("m", 6, "C", 1)]
+    assert found[0].path == (tmp_path / "m.py").resolve()
+
+
 def test_references_and_definition_locations(client: LspClient, tmp_path: Path):
     path = tmp_path / "m.py"
     client.open(path, "")
