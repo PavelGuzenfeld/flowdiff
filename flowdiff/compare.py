@@ -80,10 +80,45 @@ def leaves(base: Any, head: Any, path: str = "") -> list[tuple[str, Any, Any]]:
     return [] if base == head else [(path, base, head)]
 
 
-def value_text(value: Any, whole: bool = False) -> str:
+def is_marker(value: Any) -> bool:
+    """A summariser stand-in for something not recorded whole: {"type": T} alone, or with len/shape and a hash."""
+    return isinstance(value, dict) and "type" in value and "fields" not in value
+
+
+def pretty(value: Any) -> str:
     if value is MISSING:
         return "—"
-    return json.dumps(value) if whole else brief(value)
+    if is_marker(value):
+        digest = f"#{value['sha256'][:8]}" if "sha256" in value else ""
+        if "shape" in value:
+            return f"{value['type']}{value['shape']} {value.get('dtype', '')}{digest}".rstrip()
+        if "len" in value:
+            return f"{value['type']}[{value['len']}]{digest}"
+        return f"<{value['type']}>"
+    if is_object(value):
+        return f"{value['type'].rsplit('.', 1)[-1]}(" + ", ".join(f"{k}={pretty(v)}" for k, v in value["fields"].items()) + ")"
+    if isinstance(value, list):
+        return "[" + ", ".join(pretty(v) for v in value) + "]"
+    if isinstance(value, dict):
+        return "{" + ", ".join(f"{k}: {pretty(v)}" for k, v in value.items()) + "}"
+    return json.dumps(value)
+
+
+def value_text(value: Any, whole: bool = False) -> str:
+    text = pretty(value)
+    return text if whole or len(text) <= BRIEF_LIMIT else text[:BRIEF_LIMIT - 1] + "…"
+
+
+def flatten(value: Any, path: str = "") -> list[tuple[str, Any]]:
+    """Every leaf of a summarised value with its path; objects' fields are folded, lists of leaves stay one leaf."""
+    if is_object(value):
+        return flatten(value["fields"], path) if value["fields"] else [(path, {"type": value["type"]})]
+    if isinstance(value, dict) and not is_marker(value) and value:
+        return [leaf for k, v in value.items() for leaf in flatten(v, f"{path}.{k}" if path else k)]
+    if isinstance(value, list) and any(is_object(v) or isinstance(v, list) or (isinstance(v, dict) and not is_marker(v))
+                                       for v in value):
+        return [leaf for i, v in enumerate(value) for leaf in flatten(v, f"{path}[{i}]")]
+    return [(path, value)]
 
 
 @dataclass(frozen=True)
@@ -180,7 +215,7 @@ def call_rows(b: dict[str, Any], h: dict[str, Any], path: str | None) -> list[tu
             rows += [(p, value_text(lb), value_text(lh)) for p, lb, lh in leaves(b.get(key, MISSING), h.get(key, MISSING), key)]
         elif path == key or path.startswith(key + ".") or path.startswith(key + "["):
             bv, hv = descend(b.get(key, MISSING), path[len(key):]), descend(h.get(key, MISSING), path[len(key):])
-            rows.append((path, value_text(bv, whole=True), value_text(hv, whole=True)))
+            rows.append((path, pretty(bv), pretty(hv)))
     return rows
 
 
@@ -251,8 +286,11 @@ def show(report: Report, frame: str, path: str | None = None) -> str:
     return "\n".join(lines)
 
 
+MAX_CALL_ROWS = 60
+
+
 def show_call(report: Report, frame: str, index: int, path: str | None = None) -> str:
-    """One call whole: every argument and the return on both sides, differing rows marked."""
+    """One call as a flat leaf table: identical leaves as one value, differing ones as base → head *."""
     base, head = report.base.get(frame, []), report.head.get(frame, [])
     if index >= max(len(base), len(head)):
         return f"{frame}  has no call #{index + 1}"
@@ -260,12 +298,21 @@ def show_call(report: Report, frame: str, index: int, path: str | None = None) -
     h = head[index].values() if index < len(head) else {}
     keys = [k for k in b if k not in ("return", "raises")] + [k for k in h if k not in b and k not in ("return", "raises")]
     keys += [k for k in ("raises", "return") if k in b or k in h]
-    rows = []
+    rows: list[tuple[str, str]] = []
     for key in keys:
         if path is not None and not (path == key or path.startswith(key + ".") or path.startswith(key + "[")):
             continue
         rest = path[len(key):] if path is not None else ""
-        bv, hv = descend(b.get(key, MISSING), rest), descend(h.get(key, MISSING), rest)
-        rows.append((path or key, value_text(bv, whole=True), value_text(hv, whole=True) + ("" if bv == hv else "   *")))
+        bl = dict(flatten(descend(b.get(key, MISSING), rest), path or key))
+        hl = dict(flatten(descend(h.get(key, MISSING), rest), path or key))
+        for leaf in list(bl) + [p for p in hl if p not in bl]:
+            bv, hv = bl.get(leaf, MISSING), hl.get(leaf, MISSING)
+            rows.append((leaf, pretty(bv) if bv == hv else f"{pretty(bv)}  →  {pretty(hv)}   *"))
     lines = [f"{frame}  call #{index + 1}{tests_of(report, frame, [index])}"]
-    return "\n".join(lines + (table(rows) if rows else [f"    {path}: not an argument of this call"]))
+    if not rows:
+        return "\n".join(lines + [f"    {path}: not an argument of this call"])
+    width = min(max(len(r[0]) for r in rows), PATH_COLUMN)
+    lines += [f"    {p:<{width}}  {text}" for p, text in rows[:MAX_CALL_ROWS]]
+    if len(rows) > MAX_CALL_ROWS:
+        lines.append(f"    … +{len(rows) - MAX_CALL_ROWS} more leaves; narrow with {short(frame)}#{index + 1}/path")
+    return "\n".join(lines)

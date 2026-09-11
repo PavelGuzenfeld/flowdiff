@@ -48,7 +48,7 @@ def test_show_after_play_differs_exactly_where_the_edit_differs(played: Path, ca
     assert cli.main(["show", "clamp/ceiling", "--repo", str(played)]) == 0
     assert capsys.readouterr().out.splitlines()[1:] == ["  calls #1", "    ceiling  100  →  100"]
     assert cli.main(["show", "scale#1", "--repo", str(played)]) == 0
-    assert capsys.readouterr().out.splitlines() == ["lib.py:scale  call #1", "    value   4  →  4",
+    assert capsys.readouterr().out.splitlines() == ["lib.py:scale  call #1", "    value   4",
                                                     "    return  8  →  12   *"]
 
 

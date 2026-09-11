@@ -208,15 +208,47 @@ def test_show_call_prints_one_call_whole_and_marks_the_differing_rows():
     r = report(base, head)
     assert compare.show_call(r, "f", 0).splitlines() == [
         "f  call #1  ← t.py::a",
-        "    x       1  →  1",
-        '    cfg     {"type": "Cfg", "fields": {"a": 1}}  →  {"type": "Cfg", "fields": {"a": 1, "n": true}}   *',
-        '    return  {"type": "Out", "fields": {"ok": true}}  →  {"type": "Out", "fields": {"ok": false}}   *']
+        "    x          1",
+        "    cfg.a      1",
+        "    cfg.n      —  →  true   *",
+        "    return.ok  true  →  false   *"]
     assert compare.show_call(r, "f", 0, "cfg.n").splitlines()[1] == "    cfg.n  —  →  true   *"
     assert compare.show_call(r, "f", 0, "return.ok").splitlines()[1] == "    return.ok  true  →  false   *"
+    assert compare.show_call(r, "f", 0, "cfg").splitlines()[1:] == ["    cfg.a  1", "    cfg.n  —  →  true   *"]
     assert compare.show_call(r, "f", 0, "nope").splitlines()[1] == "    nope: not an argument of this call"
     assert compare.show_call(r, "f", 3) == "f  has no call #4"
     only_head = compare.Report(["f"], {}, head)
-    assert compare.show_call(only_head, "f", 0).splitlines()[1] == "    x       —  →  1   *"
+    assert compare.show_call(only_head, "f", 0).splitlines()[1].split() == ["x", "—", "→", "1", "*"]
+
+
+def test_show_call_caps_the_rows_and_says_how_to_narrow():
+    wide = {f"k{i}": i for i in range(70)}
+    r = compare.Report(["lib.py:f"], {"lib.py:f": [compare.Call(1, {"d": wide}, 0, end=2)]},
+                       {"lib.py:f": [compare.Call(1, {"d": wide}, 0, end=2)]})
+    lines = compare.show_call(r, "lib.py:f", 0).splitlines()
+    assert compare.MAX_CALL_ROWS == 60 and len(lines) == 62
+    assert lines[-1] == "    … +11 more leaves; narrow with f#1/path"
+
+
+def test_pretty_renders_markers_objects_and_containers_short():
+    assert compare.pretty({"type": "pathlib.PosixPath"}) == "<pathlib.PosixPath>"
+    assert compare.pretty({"type": "str", "len": 69, "sha256": "b1a22781e3e6fc48"}) == "str[69]#b1a22781"
+    assert compare.pretty({"type": "numpy.ndarray", "shape": [2, 2], "dtype": "float32", "sha256": "abcdef0123"}) \
+        == "numpy.ndarray[2, 2] float32#abcdef01"
+    assert compare.pretty(obj("flowdiff.lsp.ServerConfig", a=1, p={"type": "P"})) == "ServerConfig(a=1, p=<P>)"
+    assert compare.pretty([1, "s", obj("T")]) == '[1, "s", T()]' and compare.pretty({"k": None}) == "{k: null}"
+    assert compare.pretty(compare.MISSING) == "—" and compare.pretty(2.5) == "2.5"
+
+
+def test_flatten_folds_objects_expands_lists_of_objects_and_keeps_leaf_lists():
+    value = obj("Client", config=obj("Cfg", langs=["py", "cpp"], n=1), root={"type": "P"},
+                nodes=[obj("Node", name="a"), obj("Node", name="b")], empty=obj("E"), table={})
+    assert compare.flatten(value, "client") == [
+        ("client.config.langs", ["py", "cpp"]), ("client.config.n", 1), ("client.root", {"type": "P"}),
+        ("client.nodes[0].name", "a"), ("client.nodes[1].name", "b"), ("client.empty", {"type": "E"}),
+        ("client.table", {})]
+    assert compare.flatten([[1, 2], [3]], "m") == [("m[0]", [1, 2]), ("m[1]", [3])]
+    assert compare.flatten(compare.MISSING, "x") == [("x", compare.MISSING)]
 
 
 def test_descend_follows_fields_and_indices_and_stops_at_missing():
@@ -239,12 +271,12 @@ def test_describe_and_show_use_brief_values_but_a_named_argument_is_whole():
     base = {"f": [compare.Call(1, {"obj": big}, 1, end=2)]}
     head = {"f": [compare.Call(1, {"obj": 0}, 1, end=2)]}
     d = report(base, head).divergences("f")[0]
-    assert d.describe().startswith("obj {\"type\": \"Thing\"") and d.describe().endswith("… → 0")
+    assert d.describe().startswith("obj Thing(0=0, 1=1") and d.describe().endswith("… → 0")
     assert len(d.describe()) < 80
     table = compare.show(report(base, head), "f")
-    assert "…" in table and json.dumps(big) not in table
+    assert "…" in table and "29=29" not in table
     whole = compare.show(report(base, head), "f", "obj")
-    assert json.dumps(big) in whole and whole.splitlines()[1] == "  calls #1"
+    assert "Thing(0=0, 1=1" in whole and "29=29)  →  0" in whole and whole.splitlines()[1] == "  calls #1"
 
 
 def test_resolve_accepts_the_short_name_or_the_full_frame():
