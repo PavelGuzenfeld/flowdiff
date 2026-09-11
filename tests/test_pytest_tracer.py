@@ -32,6 +32,20 @@ def test_session_hooks_start_then_stop_the_tracer_and_release_the_tool(tmp_path:
     assert sys.monitoring.get_tool(sys.monitoring.PROFILER_ID) is None
 
 
+def test_logstart_and_logfinish_set_and_clear_the_context(tmp_path: Path, monkeypatch, released):
+    monkeypatch.setenv("FLOWDIFF_TREE", str(tmp_path))
+    monkeypatch.setenv("FLOWDIFF_FRAMES", "[]")
+    monkeypatch.setenv("FLOWDIFF_OUT", str(tmp_path / "t.jsonl"))
+    pytest_tracer.pytest_runtest_logstart("t.py::early", None)
+    pytest_tracer.pytest_sessionstart(None)
+    assert pytest_tracer._tracer is not None and pytest_tracer._tracer.context is None
+    pytest_tracer.pytest_runtest_logstart("t.py::a", None)
+    assert pytest_tracer._tracer.context == "t.py::a"
+    pytest_tracer.pytest_runtest_logfinish("t.py::a", None)
+    assert pytest_tracer._tracer.context is None
+    pytest_tracer.pytest_sessionfinish(None, 0)
+
+
 def test_a_fresh_plugin_has_no_tracer_and_finishing_without_a_start_does_nothing(released):
     fresh = importlib.reload(pytest_tracer)
     assert fresh._tracer is None
@@ -61,6 +75,7 @@ def test_plugin_traces_the_named_frames_across_every_collected_test(tmp_path: Pa
     assert proc.returncode == 1, proc.stdout + proc.stderr
     calls = compare.load(out)["lib.py:scale"]
     assert [(c.args, c.result) for c in calls] == [({"v": 3}, 6), ({"v": 1}, 2)]
+    assert [c.test for c in calls] == ["tests/test_lib.py::test_entry", "tests/test_lib.py::test_scale_fails"]
     assert "lib.py:entry" not in compare.load(out)
 
 

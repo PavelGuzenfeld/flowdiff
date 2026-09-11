@@ -102,6 +102,18 @@ def test_tree_and_scratch_paths_in_values_are_normalised(tmp_path: Path, lib, ba
     assert recs[0]["args"] == {"x": "<tree>/data"}
 
 
+def test_context_is_recorded_on_every_event_while_set(tmp_path: Path, lib, backend):
+    out = tmp_path / "trace.jsonl"
+    with trace_py.trace(str(tmp_path), ["lib.py:g"], str(out)) as tracer:
+        lib.g(1)
+        tracer.context = "tests/t.py::test_a"
+        lib.g(2)
+        tracer.context = None
+        lib.g(3)
+    recs = records(out)
+    assert [r.get("test") for r in recs] == [None, None, "tests/t.py::test_a", "tests/t.py::test_a", None, None]
+
+
 def test_varargs_and_keywords_are_named_with_their_stars(tmp_path: Path, lib, backend):
     recs = run(tmp_path, lib, ["lib.py:f"], lambda m: m.f(1, 2, 3, k="v"))
     assert recs[0]["args"] == {"x": 1, "*rest": [2, 3], "**opts": {"k": "v"}}

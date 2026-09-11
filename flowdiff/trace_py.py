@@ -27,6 +27,8 @@ class Tracer:
         self.wanted = set(frames)
         self.out = open(out_path, "w")
         self.seq = 0
+        # Set by the pytest plugin to the running test's node id; recorded on every event.
+        self.context: Optional[str] = None
         self._tool = None
         self._previous_trace: Any = None
         summarise.load_project_summariser(self.tree, os.environ.get("FLOWDIFF_SCRATCH"))
@@ -38,6 +40,8 @@ class Tracer:
     def record(self, event: str, key: str, payload: dict) -> None:
         self.seq += 1
         line = {"seq": self.seq, "event": event, "frame": key}
+        if self.context is not None:
+            line["test"] = self.context
         line.update(payload)
         self.out.write(json.dumps(line, default=repr) + "\n")
 

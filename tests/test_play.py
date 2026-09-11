@@ -147,6 +147,18 @@ def test_show_prints_the_frame_and_narrows_by_argument(repo: Path, capsys):
     assert capsys.readouterr().out.splitlines()[1:] == ["  calls #1", "    x  1  →  1"]
 
 
+def test_show_with_a_call_selector_prints_that_call_whole(repo: Path, capsys):
+    recorded(repo)
+    assert cli.main(["show", "f#1", "--repo", str(repo)]) == 0
+    assert capsys.readouterr().out.splitlines() == ["lib.py:f  call #1", "    x       1", "    return  2  →  3   *"]
+    assert cli.main(["show", "f#1/x", "--repo", str(repo)]) == 0
+    assert capsys.readouterr().out.splitlines()[1] == "    x  1"
+    assert cli.main(["show", "f#2", "--repo", str(repo)]) == 0
+    assert capsys.readouterr().out == "lib.py:f  has no call #2\n"
+    assert cli.main(["show", "f#one", "--repo", str(repo)]) == 1
+    assert "must be a number" in capsys.readouterr().err
+
+
 def test_show_of_an_unknown_frame_is_exit_2(repo: Path, capsys):
     recorded(repo)
     assert cli.main(["show", "nope", "--repo", str(repo)]) == 2
