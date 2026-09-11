@@ -203,11 +203,13 @@ def render_all(analysis: Analysis, full: bool, list_tests: bool = False) -> None
     bases = [b for f, b in zip(analysis.flows, analysis.base_flows) if not f.removed_only]
     for i, flow in enumerate(shown, 1):
         if i <= len(bases):
-            left = render.render_graph(bases[i - 1]) if bases[i - 1].frames else "(not in the base revision)"
+            base = bases[i - 1]
+            left = render.render_graph(base) if base.frames else "(not in the base revision)"
             print(f"flow {i}/{len(shown)}")
             print(render.split_view(left, render.render_graph(flow)))
-            print("\n".join(render.render_flow(i, len(shown), flow, full, list_tests).splitlines()[1:])
-                  .split(render.render_graph(flow), 1)[-1].lstrip("\n"))
+            print(render.verdict(flow))
+            if list_tests and flow.tests:
+                print("\n".join(f"  {t}" for t in flow.tests))
         else:
             print(render.render_flow(i, len(shown), flow, full, list_tests))
         if i < len(shown):
