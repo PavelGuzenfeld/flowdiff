@@ -61,6 +61,9 @@ class FakeClient:
     def close(self) -> None:
         self.closed = True
 
+    def wait_for_index(self, timeout: float, grace: float = 2.0) -> bool:
+        return True
+
     def workspace_symbols(self, query: str) -> list[Symbol]:
         return [s for s in self.symbols.values() if s.name.rsplit("::", 1)[-1] == query]
 
