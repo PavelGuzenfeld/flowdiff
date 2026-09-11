@@ -5,13 +5,14 @@ from __future__ import annotations
 
 import argparse
 import shutil
+from collections import Counter
 import subprocess
 import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable
 
-from . import changes, container, graph, lsp, render
+from . import changes, container, graph, lsp, render, worktree
 
 EXIT_OK, EXIT_TOOL_ERROR, EXIT_NOTHING, EXIT_DIFF = 0, 1, 2, 3
 REQUIRED_BINARIES = {"git": "apt install git", "ast-grep": "cargo install ast-grep or a release binary",
@@ -35,7 +36,7 @@ Visitor = Callable[[lsp.LspClient, graph.Graph, list[graph.Flow], Analysis], Non
 
 
 def add_common(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("ref", nargs="?", help="base revision; default compares the working tree to HEAD")
+    parser.add_argument("ref", nargs="?", help="base revision, or base..head; default compares the working tree to HEAD")
     parser.add_argument("--repo", type=Path, default=Path.cwd())
     parser.add_argument("--hops", type=int, default=3)
     parser.add_argument("--no-tests", action="store_true")
@@ -96,6 +97,23 @@ def repo_root(repo: Path) -> Path | None:
         return None
 
 
+def revisions(root: Path, ref: str | None) -> changes.Revisions:
+    """No ref: the working tree against HEAD. A: HEAD against A. A..B: B against A."""
+    if ref is None:
+        return changes.Revisions(root, "HEAD", None)
+    base, sep, head = ref.partition("..")
+    if not sep:
+        return changes.Revisions(root, ref, "HEAD")
+    return changes.Revisions(root, base or "HEAD", head or "HEAD")
+
+
+def head_checkout(root: Path, revs: changes.Revisions) -> tuple[Path, changes.Revisions]:
+    """A..B with both resolved in the main repo (inside the worktree HEAD~N would count from B), B checked out."""
+    base, head = (changes.git(root, "rev-parse", "--verify", f"{r}^{{commit}}").strip() for r in (revs.base, revs.head))
+    tree = worktree.head_worktree(root, head)
+    return tree, changes.Revisions(tree, base, head)
+
+
 def analyse(args: argparse.Namespace, visit: Visitor | None = None) -> Analysis | int:
     if (code := check_tools()) != EXIT_OK:
         return code
@@ -103,8 +121,10 @@ def analyse(args: argparse.Namespace, visit: Visitor | None = None) -> Analysis 
     if root is None:
         return EXIT_TOOL_ERROR
 
-    revs = changes.Revisions(root, args.ref or "HEAD", None if args.ref is None else "HEAD")
+    revs = revisions(root, args.ref)
     try:
+        if ".." in (args.ref or ""):
+            root, revs = head_checkout(root, revs)
         hunks = changes.diff_hunks(revs)
     except subprocess.CalledProcessError as err:
         detail = (err.stderr or "").splitlines()
@@ -180,7 +200,6 @@ def analyse(args: argparse.Namespace, visit: Visitor | None = None) -> Analysis 
 def base_side(analysis: Analysis, config: lsp.ServerConfig, changed: list[changes.ChangedSymbol],
               flows: list[graph.Flow], args: argparse.Namespace) -> list[graph.Flow]:
     """The head flows rebuilt on the base worktree with a server rooted there, one per head flow by position."""
-    from . import worktree
     base = worktree.base_worktree(analysis.root, analysis.revs.base)
     if analysis.container is not None and not args.no_build:
         failure = container.build(analysis.container, base, args.build_timeout)
@@ -227,8 +246,8 @@ def render_all(analysis: Analysis, full: bool, list_tests: bool = False) -> None
     if removed:
         print(("\n" if shown else "") + render.render_removed(removed))
     sys.stdout.flush()
-    for w in analysis.warnings:
-        print(f"warning: {w}", file=sys.stderr)
+    for w, n in Counter(analysis.warnings).items():
+        print(f"warning: {w}" + (f" (×{n})" if n > 1 else ""), file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:

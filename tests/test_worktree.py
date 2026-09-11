@@ -37,6 +37,16 @@ def test_base_worktree_checks_out_the_ref_detached_under_scratch(repo: Path):
     assert git(repo, "status", "--short") == ""
 
 
+def test_head_worktree_keeps_the_project_name_for_its_directory(repo: Path):
+    first = git(repo, "rev-parse", "HEAD").strip()
+    commit_change(repo, SOURCE.replace("x + 1", "x + 2"))
+    head = worktree.head_worktree(repo, "HEAD~1")
+    assert head == repo / ".flowdiff" / "head" / repo.name and head.name == repo.name
+    assert git(head, "rev-parse", "HEAD").strip() == first and (head / "a.py").read_text() == SOURCE
+    assert worktree.base_worktree(repo, "HEAD") == repo / ".flowdiff" / "base"
+    assert git(repo, "status", "--short") == ""
+
+
 def test_base_worktree_is_reused_and_moved_to_the_new_ref(repo: Path):
     worktree.base_worktree(repo, "HEAD")
     second = commit_change(repo, SOURCE.replace("x + 1", "x + 2"))

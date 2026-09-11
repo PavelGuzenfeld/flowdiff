@@ -224,7 +224,7 @@ def run(args: argparse.Namespace) -> int:
     def visit(client: lsp.LspClient, g: graph.Graph, flows: list[graph.Flow], analysis: cli.Analysis) -> None:
         root = client.root
         if not base_holder:
-            base_holder.append(worktree.base_worktree(root, args.ref or "HEAD", args.clean_base))
+            base_holder.append(worktree.base_worktree(root, analysis.revs.base, args.clean_base))
         out_dir = run_dir(root)
         if client.config.language_id == "python":
             graph.open_test_files(client, g)

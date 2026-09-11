@@ -68,12 +68,15 @@ def test_unknown_ref_is_exit_1_with_gits_reason(tools_present, repo: Path, capsy
     err = capsys.readouterr().err
     assert err.startswith("git diff origin/main: ambiguous argument 'origin/main': unknown revision")
     assert "Traceback" not in err and "git <command>" not in err
+    assert cli.main(["--repo", str(repo), "HEAD..nope"]) == 1
+    assert capsys.readouterr().err.startswith("git diff HEAD: Needed a single revision")
 
 
 def test_clean_tree_against_a_ref_names_both_revisions(tools_present, repo: Path, capsys):
     assert cli.main(["--repo", str(repo), "HEAD"]) == 2
     out = capsys.readouterr().out
     assert "HEAD" in out and "working tree" not in out
+    assert not (repo / ".flowdiff" / "head").exists()
 
 
 def test_only_test_file_changes_are_exit_2(tools_present, repo: Path, capsys):
@@ -262,6 +265,45 @@ def test_render_all_numbers_only_live_flows_and_collapses_removed_ones(monkeypat
     assert "tests/t.py::t" not in captured.out and captured.err == "warning: w1\n"
     cli.render_all(cli.Analysis(tmp_path, analysis.revs, flows[:1]), full=False)
     assert capsys.readouterr().out == "1 symbols removed, nothing to enter from: g-\n"
+
+
+def test_repeated_warnings_collapse_to_one_line_with_a_count(capsys, tmp_path: Path):
+    analysis = cli.Analysis(tmp_path, changes.Revisions(tmp_path, "HEAD", None), [], ["w1", "w2", "w1"])
+    cli.render_all(analysis, full=False)
+    assert capsys.readouterr().err == "warning: w1 (×2)\nwarning: w2\n"
+
+
+def test_revisions_read_a_ref_or_a_range(tmp_path: Path):
+    R = changes.Revisions
+    assert cli.revisions(tmp_path, None) == R(tmp_path, "HEAD", None)
+    assert cli.revisions(tmp_path, "v1") == R(tmp_path, "v1", "HEAD")
+    assert cli.revisions(tmp_path, "v1..v2") == R(tmp_path, "v1", "v2")
+    assert cli.revisions(tmp_path, "..v2") == R(tmp_path, "HEAD", "v2")
+    assert cli.revisions(tmp_path, "v1..") == R(tmp_path, "v1", "HEAD")
+
+
+def test_a_range_is_analysed_from_a_worktree_at_its_head(tools_present, monkeypatch, repo: Path):
+    from flowdiff import lsp
+    from fake_client import FakeClient, symbol
+    second = SOURCE.replace("x + 1", "x + 2")
+    (repo / "a.py").write_text(second)
+    git(repo, "commit", "-q", "-am", "f changes")
+    (repo / "a.py").write_text(second.replace("* 2", "* 3"))
+    git(repo, "commit", "-q", "-am", "g changes")
+    (repo / "a.py").write_text(second.replace("* 2", "* 4"))
+    monkeypatch.setattr(lsp, "LspClient",
+                        lambda cfg, root, timeout: FakeClient(root, {"f": symbol("f", root / "a.py", 0, last=2),
+                                                                     "g": symbol("g", root / "a.py", 4, last=6)}, {}))
+    monkeypatch.setattr(changes, "comment_spans", lambda *a: [])
+    analysis = cli.analyse(cli.build_parser().parse_args(["--repo", str(repo), "--no-tests", "HEAD~2..HEAD~1"]))
+    assert isinstance(analysis, cli.Analysis)
+    head = repo / ".flowdiff" / "head" / repo.name
+    shas = [git(repo, "rev-parse", r).strip() for r in ("HEAD~2", "HEAD~1")]
+    assert analysis.root == head and analysis.revs == changes.Revisions(head, *shas)
+    assert (head / "a.py").read_text() == second
+    assert [n.name for fl in analysis.flows for n in fl.changed] == ["f"]
+    assert cli.analyse(cli.build_parser().parse_args(["--repo", str(repo), "HEAD..HEAD"])) == 2
+    assert (head / "a.py").read_text() == second.replace("* 2", "* 3")
 
 
 def test_parser_accepts_a_base_ref_and_overrides():
