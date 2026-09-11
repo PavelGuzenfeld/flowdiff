@@ -96,8 +96,24 @@ def test_missing_language_server_is_exit_1(monkeypatch, repo: Path, capsys):
 def test_parser_defaults():
     args = cli.build_parser().parse_args([])
     assert (args.ref, args.hops, args.timeout) == (None, 3, 60.0)
-    assert args.no_tests is False and args.full is False and args.list_tests is False
+    assert args.no_tests is False and args.full is False and args.list_tests is False and args.split is False
     assert args.repo == Path.cwd()
+
+
+def test_render_all_draws_base_beside_head_when_base_flows_exist(monkeypatch, capsys, tmp_path: Path):
+    from flowdiff import graph, render
+    monkeypatch.setattr(render, "render_graph", lambda f: "HEAD-GRAPH" if f.frames and f.frames[0].name == "l" else "BASE-GRAPH")
+    live = graph.Node("l", "l", tmp_path / "m.py", 5, 0, "body")
+    old = graph.Node("o", "o", tmp_path / "m.py", 5, 0, "body")
+    flows = [graph.Flow([live], live, [live], [], False, []), graph.Flow([live], live, [live], [], False, [])]
+    bases = [graph.Flow([old], old, [old], [], False, []), graph.Flow([], None, [], [], True, [])]
+    analysis = cli.Analysis(tmp_path, changes.Revisions(tmp_path, "HEAD", None), flows, [], None, bases)
+    cli.render_all(analysis, full=False)
+    out = capsys.readouterr().out
+    assert "flow 1/2\nbase         │   head\nBASE-GRAPH   │   HEAD-GRAPH\nentry l  (1 frames, 1 changed: l~)\nno covering tests\n" in out
+    second = out.split("flow 2/2\n", 1)[1].splitlines()
+    assert second[0].split("│") == ["base" + " " * 22 + "   ", "   head"]
+    assert second[1].split("│") == ["(not in the base revision)   ", "   HEAD-GRAPH"]
 
 
 def test_render_all_numbers_only_live_flows_and_collapses_removed_ones(monkeypatch, capsys, tmp_path: Path):

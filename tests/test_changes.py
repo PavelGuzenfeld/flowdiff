@@ -150,6 +150,24 @@ def test_scan_kinds_matches_any_of_the_listed_kinds():
     assert lines == [(0, 0), (1, 3)]
 
 
+def test_base_symbols_match_changed_symbols_by_name_and_kind_in_the_base_tree(tmp_path: Path):
+    from fake_client import FakeClient, symbol
+    root, base = tmp_path / "root", tmp_path / "base"
+    (base / "pkg").mkdir(parents=True)
+    (root / "pkg").mkdir(parents=True)
+    (base / "pkg" / "m.py").write_text("def f():\n    pass\n\n\ndef g():\n    pass\n")
+    head_f = symbol("f", root / "pkg" / "m.py", 0)
+    head_new = symbol("new", root / "pkg" / "m.py", 8)
+    head_gone = symbol("gone", root / "pkg" / "other.py", 0)
+    base_f, base_g = symbol("f", base / "pkg" / "m.py", 0), symbol("g", base / "pkg" / "m.py", 4)
+    client = FakeClient(base, {"f": base_f, "g": base_g})
+    changed = [changes.ChangedSymbol(head_f, "body"), changes.ChangedSymbol(head_new, "added"),
+               changes.ChangedSymbol(head_gone, "removed")]
+    found = changes.base_symbols(client, root, base, changed)
+    assert [(c.symbol.name, c.symbol.path, c.status) for c in found] == [("f", base / "pkg" / "m.py", "body")]
+    assert client.opened == [base / "pkg" / "m.py"]
+
+
 def test_signature_text_prefers_detail_then_selection_line():
     with_detail = sym("f", 12, 0, 2, detail="(x: int) -> int")
     assert changes.signature_text(with_detail, "def f(x):\n") == "(x: int) -> int"

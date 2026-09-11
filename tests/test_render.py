@@ -147,6 +147,13 @@ def test_render_flow_small_graph_includes_tests(monkeypatch):
     assert render.render_flow(2, 3, f, list_tests=True).endswith("covered by 1 test(s)\n  tests/t.py::t")
 
 
+def test_split_view_pads_the_left_column_and_pairs_lines():
+    out = render.split_view("a\nlonger line", "x\ny\nz")
+    assert out.splitlines() == ["base          │   head", "a             │   x", "longer line   │   y", "              │   z"]
+    assert render.split_view("", "only", ("L", "R")).splitlines() == ["L   │   R", "    │   only"]
+    assert render.GUTTER == "   │   "
+
+
 def test_render_removed_collapses_every_removed_symbol_into_one_line():
     flows = [flow([node("b", "removed")], [], changed=[node("b", "removed")]),
              flow([node("a", "removed")], [], changed=[node("a", "removed")])]
