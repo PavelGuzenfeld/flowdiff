@@ -276,7 +276,9 @@ def test_send_frames_messages_with_a_content_length_header(tmp_path: Path):
         c.notify("test/framing", {"a": 1})
         payload = json.dumps({"jsonrpc": "2.0", "method": "test/framing",
                               "params": {"a": 1}}).encode()
-        assert written == [b"Content-Length: %d\r\n\r\n" % len(payload) + payload]
+        # The reader thread may answer the fake server's own requests through the same stub meanwhile.
+        ours = [frame for frame in written if b"test/framing" in frame]
+        assert ours == [b"Content-Length: %d\r\n\r\n" % len(payload) + payload]
     finally:
         c._proc.kill()
 
