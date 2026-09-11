@@ -127,9 +127,13 @@ def test_detect_builds_the_layer_and_reads_the_workdir(tmp_path: Path, fake, mon
     root.mkdir()
     monkeypatch.setattr(container.shutil, "which", lambda name: "/usr/bin/docker")
     c = container.detect(root, None)
-    assert c == container.Container("flowdiff/proj:dev", "/src")
+    assert (c.image, c.workdir, c.compile_commands_dir) == ("flowdiff/proj:dev", "/src", "/src/builddir")
     fake.images["bare:dev"] = {"id": "sha256:b"}
     assert container.detect(root, "bare:dev").workdir == "/src"
+    (root / "build" / "pkg").mkdir(parents=True)
+    (root / "build" / "pkg" / "compile_commands.json").write_text(json.dumps([{"directory": "/rocx/build/pkg", "file": "/rocx/pkg/a.cpp", "command": "c++"}]))
+    c = container.detect(root, None)
+    assert (c.workdir, c.compile_commands_dir) == ("/rocx", "/rocx/build/pkg")
     with pytest.raises(container.ContainerError, match="no dev image for other"):
         container.detect(tmp_path / "other", None)
     monkeypatch.setattr(container.shutil, "which", lambda name: None)
@@ -152,12 +156,86 @@ def test_build_configures_once_then_runs_the_incremental_build(tmp_path: Path, f
 
 def test_build_falls_back_to_cmake_and_reports_missing_build_systems(tmp_path: Path, fake):
     c = container.Container("img", "/src")
-    assert container.build(c, tmp_path, 10) == f"{tmp_path}: neither meson.build nor CMakeLists.txt; no build system to run"
+    assert container.build(c, tmp_path, 10) == f"{tmp_path}: no meson.build, CMakeLists.txt or package.xml; no build system to run"
     (tmp_path / "CMakeLists.txt").write_text("")
     assert container.build(c, tmp_path, 10) is None
     runs = [cmd[cmd.index("img") + 1:] for cmd in fake.calls if cmd[1] == "run"]
     assert runs[0][:4] == ["cmake", "-S", ".", "-B"] and "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON" in runs[0]
     assert runs[1] == ["cmake", "--build", "builddir"]
+
+
+def test_build_runs_colcon_for_a_workspace_of_packages(tmp_path: Path, fake):
+    c = container.Container("img", "/rocx")
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "package.xml").write_text("<package/>")
+    assert container.build_system(tmp_path) == "colcon"
+    assert container.build(c, tmp_path, 10) is None
+    runs = [cmd[cmd.index("img") + 1:] for cmd in fake.calls if cmd[1] == "run"]
+    assert runs == [["colcon", "build", "--symlink-install", "--cmake-args", "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"]]
+    (tmp_path / "CMakeLists.txt").write_text("")
+    assert container.build_system(tmp_path) == "cmake"
+    (tmp_path / "meson.build").write_text("")
+    assert container.build_system(tmp_path) == "meson"
+    nested = tmp_path / "ws"
+    (nested / "src" / "p").mkdir(parents=True)
+    (nested / "src" / "p" / "package.xml").write_text("")
+    assert container.build_system(nested) == "colcon" and container.build_system(tmp_path / "empty") is None
+
+
+def test_compile_databases_are_merged_per_package_first(tmp_path: Path):
+    assert container.compile_database(tmp_path) is None
+    top = tmp_path / "build" / "compile_commands.json"
+    pkg = tmp_path / "build" / "pkg" / "compile_commands.json"
+    pkg.parent.mkdir(parents=True)
+    pkg.write_text(json.dumps([{"directory": "/rocx/build/pkg", "file": "/rocx/pkg/a.cpp", "command": "fresh"}]))
+    assert container.compile_database(tmp_path) == pkg
+    top.write_text(json.dumps([{"directory": "/rocx/build/pkg", "file": "/rocx/pkg/a.cpp", "command": "stale"},
+                               {"directory": "/rocx/build/other", "file": "/rocx/other/b.cpp", "command": "b"}]))
+    merged = container.compile_database(tmp_path)
+    assert merged == tmp_path / ".flowdiff" / "compile_commands.json"
+    entries = json.loads(merged.read_text())
+    assert [(e["file"], e["command"]) for e in entries] == [("/rocx/pkg/a.cpp", "fresh"), ("/rocx/other/b.cpp", "b")]
+    assert (tmp_path / ".flowdiff" / ".gitignore").read_text() == "*\n"
+    assert merged.read_text() == json.dumps(entries, indent=1)
+    stamp = merged.stat().st_mtime_ns
+    container.compile_database(tmp_path)
+    assert merged.stat().st_mtime_ns == stamp
+    top.write_text("broken")
+    (tmp_path / "compile_commands.json").write_text(json.dumps([{"directory": "/rocx", "file": "/rocx/c.cpp", "command": "c"}]))
+    entries = json.loads(container.compile_database(tmp_path).read_text())
+    assert [e["file"] for e in entries] == ["/rocx/pkg/a.cpp", "/rocx/c.cpp"]
+    assert container.entries_of(None) == [] and container.entries_of(top) == []
+
+
+def test_mount_point_comes_from_the_databases_directory(tmp_path: Path):
+    pkg = tmp_path / "build" / "pkg" / "compile_commands.json"
+    pkg.parent.mkdir(parents=True)
+    entries = [{"directory": "/rocx/build/pkg", "file": "/rocx/pkg/a.cpp"}]
+    assert container.mount_point(tmp_path, pkg, entries) == "/rocx"
+    assert container.db_dir_of(tmp_path, pkg, "/rocx") == "/rocx/build/pkg"
+    root_db = tmp_path / "compile_commands.json"
+    assert container.mount_point(tmp_path, root_db, [{"directory": "/src"}]) == "/src"
+    assert container.mount_point(tmp_path, root_db, [{"directory": str(tmp_path)}]) is None
+    assert container.mount_point(tmp_path, root_db, [{"directory": str(tmp_path)}, {"directory": "/src"}]) == "/src"
+    assert container.db_dir_of(tmp_path, root_db, "/src") == "/src"
+    pkg.write_text(json.dumps(entries))
+    merged = tmp_path / ".flowdiff" / "compile_commands.json"
+    merged.parent.mkdir()
+    assert container.mount_point(tmp_path, merged, [{"directory": "/nowhere/x"}]) == "/rocx"
+    assert container.mount_point(tmp_path, merged, []) == "/rocx"
+    c = container.Container("img", "/rocx", "/rocx/.flowdiff")
+    assert c.compile_commands_dir == "/rocx/.flowdiff"
+    assert c.host_path(tmp_path, "/rocx/build/pkg") == tmp_path / "build" / "pkg"
+    assert c.host_path(tmp_path, "/rocx") == tmp_path and c.host_path(tmp_path, "/usr/include") == Path("/usr/include")
+
+
+def test_needs_container_reads_the_per_package_database(tmp_path: Path):
+    pkg = tmp_path / "build" / "pkg" / "compile_commands.json"
+    pkg.parent.mkdir(parents=True)
+    pkg.write_text(json.dumps([{"directory": "/rocx/build/pkg", "file": "a.cpp"}]))
+    assert container.needs_container(tmp_path)
+    pkg.write_text(json.dumps([{"directory": str(pkg.parent), "file": "a.cpp"}]))
+    assert not container.needs_container(tmp_path)
 
 
 def test_build_reports_a_failing_step_and_a_timeout(tmp_path: Path, monkeypatch):

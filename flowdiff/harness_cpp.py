@@ -1,8 +1,13 @@
-"""The C++ side of play: which built test executables reach the flow, and how to run one under gdb in the
-container so the flow's frames are traced (decisions 20 to 24, 28, 39, 41, 42)."""
+"""The C++ side of play: which built test executables reach the flow, how to build a literal harness
+against the entry's translation unit, and how to run either under gdb in the container so the flow's
+frames are traced (decisions 18 to 24, 28, 39, 41, 42).
+
+Two build layouts are understood. Meson keeps a target's objects under <target>.p/ next to the artefact
+and names the object in the compile database's output field. CMake (and colcon, which drives CMake per
+package) keeps them under <build dir>/CMakeFiles/<target>.dir/ with no output field, and puts the
+executable or lib<target>.so in that build dir."""
 from __future__ import annotations
 
-import json
 import re
 import shlex
 from pathlib import Path
@@ -10,7 +15,6 @@ from pathlib import Path
 from . import container, trace_gdb, worktree
 from .graph import Flow, Node
 
-BUILD_DIR = container.BUILD_DIR
 LITERAL = re.compile(r"""^(?:[-+]?(?:0[xX][0-9a-fA-F]+|\d+(?:\.\d*)?(?:[eE][-+]?\d+)?[uUlLfF]*)|true|false|nullptr|NULL|'(?:\\.|[^'\\])'|"(?:\\.|[^"\\])*")$""")
 
 
@@ -19,43 +23,71 @@ def frame_id(root: Path, node: Node) -> str:
 
 
 def compile_db(tree: Path) -> list[dict]:
-    path = tree / BUILD_DIR / "compile_commands.json"
-    try:
-        return json.loads(path.read_text())
-    except (OSError, ValueError):
-        return []
+    return container.entries_of(container.compile_database(tree))
+
+
+def host_dir(tree: Path, entry: dict, workdir: str | None) -> Path:
+    """The entry's directory on the host: the mount prefix translated when there is one."""
+    directory = entry.get("directory", "")
+    if workdir and (directory == workdir or directory.startswith(workdir + "/")):
+        return tree / directory[len(workdir):].lstrip("/")
+    return Path(directory) if directory else tree
 
 
 def source_of(tree: Path, entry: dict, workdir: str | None) -> Path:
-    """The entry's source as a host path. The database was written inside the container, so its
-    directory names the mount; relative files resolve against the tree's own build dir instead."""
+    """The entry's source as a host path: relative files resolve against the entry's (translated) directory."""
     file = Path(entry["file"])
     if not file.is_absolute():
-        return (tree / BUILD_DIR / file).resolve()
+        return (host_dir(tree, entry, workdir) / file).resolve()
     if workdir and file.as_posix().startswith(workdir + "/"):
         return (tree / file.as_posix()[len(workdir) + 1:]).resolve()
     return file.resolve()
 
 
-def test_executables(tree: Path, test_files: list[str], workdir: str | None = None) -> dict[str, str]:
-    """test file (tree-relative) -> executable (tree-relative), through the compile database's outputs.
+def target_of(tree: Path, entry: dict, workdir: str | None) -> tuple[Path, str] | None:
+    """(objects directory on the host, target name) for the entry's target, in either layout."""
+    output = entry.get("output", "")
+    directory = host_dir(tree, entry, workdir)
+    if ".p/" in output:
+        prefix = output.split(".p/")[0]
+        return directory / f"{prefix}.p", Path(prefix).name
+    stem = Path(entry["file"]).name + ".o"
+    for objects in sorted((directory / "CMakeFiles").glob("*.dir")):
+        if any(o.name == stem for o in objects.rglob("*.o")):
+            return objects, objects.name[: -len(".dir")]
+    return None
 
-    Meson writes objects under <target>.p/, so the executable is the .p directory's parent path
-    without the suffix; the mapping is only trusted when that file exists in the build tree."""
-    build = tree / BUILD_DIR
+
+def artefact_of(objects: Path, target: str) -> Path | None:
+    """The built artefact for a target: meson's sits beside the .p dir under its own name, CMake's is the
+    executable or lib<target>.so in the build directory."""
+    build = objects.parent.parent if objects.parent.name == "CMakeFiles" else objects.parent
+    for candidate in (build / target, build / f"lib{target}.so"):
+        if candidate.is_file():
+            return candidate
+    for candidate in build.glob(f"lib{target}.so*"):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def test_executables(tree: Path, test_files: list[str], workdir: str | None = None) -> dict[str, str]:
+    """test file (tree-relative) -> executable (tree-relative), through the compile database; only when the
+    executable exists in the build tree."""
     found: dict[str, str] = {}
     for entry in compile_db(tree):
-        source = source_of(tree, entry, workdir)
-        output = entry.get("output", "")
         try:
-            rel = source.relative_to(tree.resolve()).as_posix()
+            rel = source_of(tree, entry, workdir).relative_to(tree.resolve()).as_posix()
         except ValueError:
             continue
-        if rel not in test_files or not output or ".p/" not in output:
+        if rel not in test_files or rel in found:
             continue
-        exe = output.split(".p/", 1)[0]
-        if (build / exe).is_file():
-            found[rel] = f"{BUILD_DIR}/{exe}"
+        target = target_of(tree, entry, workdir)
+        if target is None:
+            continue
+        exe = artefact_of(*target)
+        if exe is not None and ".so" not in exe.suffixes:
+            found[rel] = exe.resolve().relative_to(tree.resolve()).as_posix()
     return found
 
 
@@ -210,61 +242,53 @@ def harness_source(tu: str, call: str) -> str:
     return f'#include "{tu}"\n\nint main() {{\n    (void)({call});\n    return 0;\n}}\n'
 
 
-def target_of(entry: dict) -> tuple[str, str] | None:
-    """(objects directory, built artefact) for a meson entry: <target>.p/ holds the objects, <target> is the artefact."""
-    output = entry.get("output", "")
-    if ".p/" not in output:
-        return None
-    prefix = output.split(".p/", 1)[0]
-    return f"{prefix}.p", prefix
-
-
 def link_inputs(ctr: container.Container, tree: Path, entry: dict) -> tuple[list[str], list[str]] | None:
     """Sibling objects of the entry's target (its own object excluded, the harness includes that TU) and the
-    linker flags for every library the built artefact NEEDs: internal ones by path, external ones by -l (22)."""
-    target = target_of(entry)
+    linker flags for every library the built artefact NEEDs: internal ones by path, external ones by -l (22).
+    Paths are container paths."""
+    target = target_of(tree, entry, ctr.workdir)
     if target is None:
         return None
-    objects_dir, artefact = target
-    build = tree / BUILD_DIR
-    own = Path(entry["output"]).name
-    siblings = sorted(f"{objects_dir}/{p.name}" for p in (build / objects_dir).glob("*.o") if p.name != own)
+    objects, name = target
+    own = Path(entry["file"]).name + ".o"
+    siblings = sorted(ctr.path(tree, o) for o in objects.rglob("*.o") if o.name != own)
+    artefact = artefact_of(objects, name)
+    if artefact is None:
+        return siblings, []
     flags: list[str] = []
     rpaths: list[str] = []
-    for lib in container.needed_libraries(ctr, tree, f"{ctr.workdir}/{BUILD_DIR}/{artefact}"):
-        internal = [p for p in build.rglob(lib) if p.is_file()]
+    build_roots = [d for d in tree.glob("build*") if d.is_dir()]
+    for lib in container.needed_libraries(ctr, tree, ctr.path(tree, artefact)):
+        internal = [p for d in build_roots for p in d.rglob(lib) if p.is_file()]
         if internal:
-            rel = internal[0].relative_to(build).as_posix()
-            flags.append(rel)
-            rpaths.append(f"-Wl,-rpath,{ctr.workdir}/{BUILD_DIR}/{Path(rel).parent.as_posix()}".rstrip("/."))
+            flags.append(ctr.path(tree, internal[0]))
+            rpaths.append(f"-Wl,-rpath,{ctr.path(tree, internal[0].parent)}")
         else:
-            name = re.sub(r"^lib|\.so(\.\d+)*$", "", lib)
-            flags.append(f"-l{name}")
+            flags.append(f"-l{re.sub(r'^lib|\.so(\.\d+)*$', '', lib)}")
     return siblings, flags + sorted(set(rpaths))
 
 
 def build_harness(ctr: container.Container, tree: Path, source_rel: str, call: str, out_dir_rel: str,
                   timeout: float) -> str | tuple[str, str]:
-    """Compile and link the harness inside the container from the build dir; the executable's
-    tree-relative path, or the error text."""
+    """Compile and link the harness inside the container from the TU's own build directory; the
+    executable's tree-relative path, or the error text."""
     entry = compile_entry(tree, source_rel, ctr.workdir)
     if entry is None:
         return f"{source_rel}: not in the compile database"
     inputs = link_inputs(ctr, tree, entry)
     if inputs is None:
-        return f"{source_rel}: its compile entry names no meson target"
+        return f"{source_rel}: its compile entry names no build target"
     siblings, libs = inputs
     harness_dir = tree / out_dir_rel
     harness_dir.mkdir(parents=True, exist_ok=True)
     (harness_dir / "harness.cpp").write_text(harness_source(f"{ctr.workdir}/{source_rel}", call))
-    build_cwd = f"{ctr.workdir}/{BUILD_DIR}"
     harness = f"{ctr.workdir}/{out_dir_rel}/harness"
-    steps = [[shlex.split(entry["command"])[0] if "command" in entry else "c++", *borrowed_flags(entry),
-              "-o", f"{harness}.o", "-c", f"{harness}.cpp"],
+    compiler = shlex.split(entry["command"])[0] if "command" in entry else (entry.get("arguments") or ["c++"])[0]
+    steps = [[compiler, *borrowed_flags(entry), "-o", f"{harness}.o", "-c", f"{harness}.cpp"],
              ["c++", f"{harness}.o", *siblings, *libs, "-pthread", "-o", harness]]
     for step in steps:
         try:
-            proc = ctr.run(tree, step, timeout=timeout, cwd=build_cwd)
+            proc = ctr.run(tree, step, timeout=timeout, cwd=entry.get("directory"))
         except Exception as exc:
             return f"harness: {exc}"
         if proc.returncode != 0:

@@ -45,6 +45,7 @@ def add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--timeout", type=float, default=60.0, help="language server request timeout")
     parser.add_argument("--image", help="the project's dev image for C++ (default: <repo>:dev when it exists)")
     parser.add_argument("--build-timeout", type=float, default=1800.0, help="seconds for a build inside the container")
+    parser.add_argument("--no-build", action="store_true", help="use the build directories as they are; never build")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -103,7 +104,13 @@ def analyse(args: argparse.Namespace, visit: Visitor | None = None) -> Analysis 
         return EXIT_TOOL_ERROR
 
     revs = changes.Revisions(root, args.ref or "HEAD", None if args.ref is None else "HEAD")
-    hunks = changes.diff_hunks(revs)
+    try:
+        hunks = changes.diff_hunks(revs)
+    except subprocess.CalledProcessError as err:
+        detail = (err.stderr or "").splitlines()
+        reason = next((line.removeprefix("fatal: ") for line in detail if line.startswith("fatal:")), "failed")
+        print(f"git diff {revs.base}: {reason}", file=sys.stderr)
+        return EXIT_TOOL_ERROR
     if not hunks:
         print("no changes between", revs.base, "and", "working tree" if revs.head is None else revs.head)
         return EXIT_NOTHING
@@ -114,7 +121,7 @@ def analyse(args: argparse.Namespace, visit: Visitor | None = None) -> Analysis 
     if any(h.path.suffix in lsp.CPP_EXTENSIONS for h in source_hunks):
         try:
             ctr = container.detect(root, args.image)
-            if ctr is not None:
+            if ctr is not None and not args.no_build:
                 print(f"building the working tree in {ctr.image}", file=sys.stderr)
                 failure = container.build(ctr, root, args.build_timeout)
                 if failure:
@@ -173,7 +180,7 @@ def base_side(analysis: Analysis, config: lsp.ServerConfig, changed: list[change
     """The head flows rebuilt on the base worktree with a server rooted there, one per head flow by position."""
     from . import worktree
     base = worktree.base_worktree(analysis.root, analysis.revs.base)
-    if analysis.container is not None:
+    if analysis.container is not None and not args.no_build:
         failure = container.build(analysis.container, base, args.build_timeout)
         if failure:
             analysis.warnings.append(f"base graph skipped: {failure.splitlines()[0]}")

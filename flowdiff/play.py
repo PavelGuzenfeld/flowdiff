@@ -148,7 +148,7 @@ def python_plan(client: lsp.LspClient, g: graph.Graph, flow: graph.Flow, root: P
 
 
 def cpp_plan(ctr: container.Container, client: lsp.LspClient, flow: graph.Flow, root: Path, base: Path,
-             out_dir: Path, index: int, timeout: float, build_timeout: float) -> Plan:
+             out_dir: Path, index: int, timeout: float, build_timeout: float, no_build: bool = False) -> Plan:
     """A C++ flow is driven by a harness that includes the entry's TU and calls it with literal arguments
     (decisions 20 to 24), else by the built test executables that reach it; either runs under gdb in the
     container."""
@@ -168,7 +168,7 @@ def cpp_plan(ctr: container.Container, client: lsp.LspClient, flow: graph.Flow, 
     call = f"{flow.entry.qualified}({', '.join(literal)})" if flow.entry is not None and literal is not None else ""
 
     def ensure_built(tree: Path) -> str | None:
-        if tree in built:
+        if tree in built or no_build:
             return None
         print(f"building {tree.relative_to(root)} in {ctr.image}", file=sys.stderr)
         failure = container.build(ctr, tree, build_timeout)
@@ -236,7 +236,7 @@ def run(args: argparse.Namespace) -> int:
                 plans[id(flow)] = python_plan(client, g, flow, root, base_holder[0], out_dir, index, args.run_timeout)
             elif analysis.container is not None:
                 plans[id(flow)] = cpp_plan(analysis.container, client, flow, root, base_holder[0], out_dir, index,
-                                           args.run_timeout, args.build_timeout)
+                                           args.run_timeout, args.build_timeout, args.no_build)
             else:
                 analysis.warnings.append(f"{flow.language} flows outside a container are analysed only")
 

@@ -243,7 +243,7 @@ def test_run_routes_cpp_flows_to_cpp_plan_when_a_container_exists(repo: Path, mo
     fake_analyse(monkeypatch, repo, [flow], language="cpp", ctr=ctr)
     seen = {}
 
-    def cpp_plan(c, client, f, root, base, out_dir, index, timeout, build_timeout):
+    def cpp_plan(c, client, f, root, base, out_dir, index, timeout, build_timeout, no_build=False):
         seen["args"] = (c, root, base, index, timeout, build_timeout)
         return written_plan(root, ["lib.cpp:scale", "lib.cpp:clamp"], 1, 2)
     monkeypatch.setattr(play, "cpp_plan", cpp_plan)

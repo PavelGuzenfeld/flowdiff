@@ -31,17 +31,56 @@ def test_test_executables_follow_meson_outputs_and_require_the_binary(tmp_path: 
         {"directory": "/src/builddir", "file": "../gst/x.cpp", "output": "gst/libx.so.p/x.cpp.o"},
         {"directory": "/src/builddir", "file": "../tests/test_c.cpp"},
         {"directory": "/src/builddir", "file": "/src/tests/test_d.cpp", "output": "tests/test_d.p/test_d.cpp.o"},
-        {"directory": "/src/builddir", "file": "/elsewhere/test_e.cpp", "output": "tests/test_e.p/test_e.cpp.o"}])
+        {"directory": "/src/builddir", "file": "/elsewhere/test_e.cpp", "output": "tests/test_e.p/test_e.cpp.o"},
+        {"directory": "/src/builddir", "file": "../tools/gen.cpp", "output": "tools/gen.p/gen.cpp.o"}])
     (build / "tests").mkdir()
+    (build / "tools").mkdir()
+    (build / "tools" / "gen").write_text("")
     for exe in ("test_a", "test_d", "test_e"):
         (build / "tests" / exe).write_text("")
     wanted = ["tests/test_a.cpp", "tests/test_b.cpp", "tests/test_c.cpp", "tests/test_d.cpp", "test_e.cpp"]
     assert harness_cpp.test_executables(tmp_path, wanted, "/src") == {
         "tests/test_a.cpp": "builddir/tests/test_a", "tests/test_d.cpp": "builddir/tests/test_d"}
-    assert harness_cpp.test_executables(tmp_path, wanted) == {"tests/test_a.cpp": "builddir/tests/test_a"}
+    assert harness_cpp.test_executables(tmp_path, wanted) == {}
     assert harness_cpp.test_executables(tmp_path / "nowhere", ["tests/test_a.cpp"]) == {}
     (build / "compile_commands.json").write_text("nonsense")
     assert harness_cpp.compile_db(tmp_path) == []
+
+
+def cmake_tree(tmp_path: Path) -> Path:
+    """A colcon-shaped tree: build/<pkg>/compile_commands.json, CMakeFiles/<target>.dir objects, executables beside."""
+    pkg = tmp_path / "build" / "pkg"
+    (pkg / "CMakeFiles" / "util_test.dir" / "test").mkdir(parents=True)
+    (pkg / "CMakeFiles" / "util_test.dir" / "test" / "util_test.cpp.o").write_text("")
+    (pkg / "CMakeFiles" / "util_test.dir" / "src" / "util.cpp.o").parent.mkdir()
+    (pkg / "CMakeFiles" / "util_test.dir" / "src" / "util.cpp.o").write_text("")
+    (pkg / "CMakeFiles" / "libutil.dir" / "src").mkdir(parents=True)
+    (pkg / "CMakeFiles" / "libutil.dir" / "src" / "util.cpp.o").write_text("")
+    (pkg / "util_test").write_text("")
+    (pkg / "liblibutil.so").write_text("")
+    (pkg / "compile_commands.json").write_text(json.dumps([
+        {"directory": "/rocx/build/pkg", "file": "/rocx/pkg/test/util_test.cpp",
+         "command": "/usr/bin/c++ -I/rocx/pkg/include -std=gnu++17 -o CMakeFiles/util_test.dir/test/util_test.cpp.o -c /rocx/pkg/test/util_test.cpp"},
+        {"directory": "/rocx/build/pkg", "file": "/rocx/pkg/src/util.cpp",
+         "command": "/usr/bin/c++ -I/rocx/pkg/include -std=gnu++17 -o CMakeFiles/libutil.dir/src/util.cpp.o -c /rocx/pkg/src/util.cpp"}]))
+    return tmp_path
+
+
+def test_test_executables_follow_cmake_object_directories(tmp_path: Path):
+    tree = cmake_tree(tmp_path)
+    assert harness_cpp.test_executables(tree, ["pkg/test/util_test.cpp", "pkg/src/util.cpp"], "/rocx") == {
+        "pkg/test/util_test.cpp": "build/pkg/util_test"}
+    entry = harness_cpp.compile_entry(tree, "pkg/src/util.cpp", "/rocx")
+    assert entry is not None and entry["file"] == "/rocx/pkg/src/util.cpp"
+    objects, name = harness_cpp.target_of(tree, entry, "/rocx")
+    assert (objects, name) == (tree / "build" / "pkg" / "CMakeFiles" / "libutil.dir", "libutil")
+    assert harness_cpp.artefact_of(objects, name) == tree / "build" / "pkg" / "liblibutil.so"
+    test_entry = harness_cpp.compile_entry(tree, "pkg/test/util_test.cpp", "/rocx")
+    objects, name = harness_cpp.target_of(tree, test_entry, "/rocx")
+    assert name == "util_test" and harness_cpp.artefact_of(objects, name) == tree / "build" / "pkg" / "util_test"
+    assert harness_cpp.host_dir(tree, {"directory": "/rocx/build/pkg"}, "/rocx") == tree / "build" / "pkg"
+    assert harness_cpp.host_dir(tree, {"directory": "/rocx"}, "/rocx") == tree
+    assert harness_cpp.host_dir(tree, {"directory": "/elsewhere"}, "/rocx") == Path("/elsewhere")
 
 
 @pytest.mark.parametrize("text,expected", [
@@ -149,11 +188,17 @@ def test_harness_source_includes_the_tu_and_calls_the_entry():
 
 
 def test_target_of_and_compile_entry(tmp_path: Path):
-    assert harness_cpp.target_of(ENTRY) == ("gst/common/libnvmm_common.so.p", "gst/common/libnvmm_common.so")
-    assert harness_cpp.target_of({"output": "x.o"}) is None and harness_cpp.target_of({}) is None
+    build = tmp_path / "builddir"
+    assert harness_cpp.target_of(tmp_path, ENTRY, "/src") == (build / "gst/common/libnvmm_common.so.p", "libnvmm_common.so")
+    (build / "gst").mkdir(parents=True)
+    assert harness_cpp.target_of(tmp_path, {"output": "x.o", "file": "x.cpp", "directory": "/src/builddir"}, "/src") is None
     write_db(tmp_path, [ENTRY, {"directory": "/src/builddir", "file": "../tests/u.cpp", "output": "tests/u.p/u.cpp.o"}])
     assert harness_cpp.compile_entry(tmp_path, "gst/common/t.cpp", "/src") == ENTRY
     assert harness_cpp.compile_entry(tmp_path, "gst/common/other.cpp", "/src") is None
+    (build / "gst" / "common").mkdir(parents=True)
+    (build / "gst" / "common" / "libnvmm_common.so").write_text("")
+    assert harness_cpp.artefact_of(build / "gst/common/libnvmm_common.so.p", "libnvmm_common.so") == build / "gst/common/libnvmm_common.so"
+    assert harness_cpp.artefact_of(build / "gst/common/nothing.p", "nothing") is None
 
 
 def test_link_inputs_take_sibling_objects_and_resolve_needed_libraries(tmp_path: Path, monkeypatch):
@@ -162,21 +207,25 @@ def test_link_inputs_take_sibling_objects_and_resolve_needed_libraries(tmp_path:
     objects.mkdir(parents=True)
     for name in ("t.cpp.o", "a.cpp.o", "b.cpp.o"):
         (objects / name).write_text("")
+    (build / "gst" / "common" / "libnvmm_common.so").write_text("")
     (build / "gst" / "alloc").mkdir()
     (build / "gst" / "alloc" / "libgstnvmmalloc.so").write_text("")
     readelf = (" 0x1 (NEEDED) Shared library: [libgstnvmmalloc.so]\n 0x1 (NEEDED) Shared library: [libgstreamer-1.0.so.0]\n"
                " 0x1 (NEEDED) Shared library: [libstdc++.so.6]\n")
     monkeypatch.setattr(harness_cpp.container.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, readelf, ""))
     siblings, flags = harness_cpp.link_inputs(container.Container("img", "/src"), tmp_path, ENTRY)
-    assert siblings == ["gst/common/libnvmm_common.so.p/a.cpp.o", "gst/common/libnvmm_common.so.p/b.cpp.o"]
-    assert flags == ["gst/alloc/libgstnvmmalloc.so", "-lgstreamer-1.0", "-lstdc++", "-Wl,-rpath,/src/builddir/gst/alloc"]
-    assert harness_cpp.link_inputs(container.Container("img", "/src"), tmp_path, {"output": "x.o", "file": "x.cpp"}) is None
+    assert siblings == ["/src/builddir/gst/common/libnvmm_common.so.p/a.cpp.o", "/src/builddir/gst/common/libnvmm_common.so.p/b.cpp.o"]
+    assert flags == ["/src/builddir/gst/alloc/libgstnvmmalloc.so", "-lgstreamer-1.0", "-lstdc++", "-Wl,-rpath,/src/builddir/gst/alloc"]
+    assert harness_cpp.link_inputs(container.Container("img", "/src"), tmp_path, {"output": "x.o", "file": "x.cpp", "directory": "/src/builddir"}) is None
+    (build / "gst" / "common" / "libnvmm_common.so").unlink()
+    assert harness_cpp.link_inputs(container.Container("img", "/src"), tmp_path, ENTRY) == (siblings, [])
 
 
 def test_build_harness_compiles_then_links_from_the_build_dir(tmp_path: Path, monkeypatch):
     build = tmp_path / "builddir"
     (build / "gst" / "common" / "libnvmm_common.so.p").mkdir(parents=True)
     (build / "gst" / "common" / "libnvmm_common.so.p" / "a.cpp.o").write_text("")
+    (build / "gst" / "common" / "libnvmm_common.so").write_text("")
     write_db(tmp_path, [ENTRY])
     calls: list[list[str]] = []
 
@@ -193,15 +242,17 @@ def test_build_harness_compiles_then_links_from_the_build_dir(tmp_path: Path, mo
     compile_cmd, link_cmd = [c for c in calls if "readelf" not in c]
     assert compile_cmd[compile_cmd.index("-w") + 1] == "/src/builddir"
     assert compile_cmd[-5:] == ["-fno-inline", "-o", "/src/.flowdiff/run/harness1/harness.o", "-c", "/src/.flowdiff/run/harness1/harness.cpp"]
-    assert link_cmd[link_cmd.index("img") + 1:] == ["c++", "/src/.flowdiff/run/harness1/harness.o", "gst/common/libnvmm_common.so.p/a.cpp.o",
+    assert link_cmd[link_cmd.index("img") + 1:] == ["c++", "/src/.flowdiff/run/harness1/harness.o",
+                                                    "/src/builddir/gst/common/libnvmm_common.so.p/a.cpp.o",
                                                     "-lc", "-pthread", "-o", "/src/.flowdiff/run/harness1/harness"]
 
 
 def test_build_harness_reports_failures(tmp_path: Path, monkeypatch):
     ctr = container.Container("img", "/src")
     assert harness_cpp.build_harness(ctr, tmp_path, "gst/t.cpp", "f()", ".flowdiff/run/h", 30) == "gst/t.cpp: not in the compile database"
+    (tmp_path / "builddir" / "gst").mkdir(parents=True)
     write_db(tmp_path, [{"directory": "/src/builddir", "file": "../gst/t.cpp", "output": "gst/t.o", "command": "c++ -c ../gst/t.cpp -o gst/t.o"}])
-    assert harness_cpp.build_harness(ctr, tmp_path, "gst/t.cpp", "f()", ".flowdiff/run/h", 30) == "gst/t.cpp: its compile entry names no meson target"
+    assert harness_cpp.build_harness(ctr, tmp_path, "gst/t.cpp", "f()", ".flowdiff/run/h", 30) == "gst/t.cpp: its compile entry names no build target"
     (tmp_path / "builddir" / "gst" / "libx.so.p").mkdir(parents=True)
     write_db(tmp_path, [{"directory": "/src/builddir", "file": "../gst/t.cpp", "output": "gst/libx.so.p/t.cpp.o", "command": "c++ -c ../gst/t.cpp -o gst/libx.so.p/t.cpp.o"}])
 
@@ -212,6 +263,23 @@ def test_build_harness_reports_failures(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(harness_cpp.container.subprocess, "run", failing)
     failure = harness_cpp.build_harness(ctr, tmp_path, "gst/t.cpp", "f()", ".flowdiff/run/h", 30)
     assert failure == "harness compile failed:\nerror: no such file"
+
+
+def test_build_harness_takes_the_compiler_from_arguments_and_defaults_to_cxx(tmp_path: Path, monkeypatch):
+    (tmp_path / "builddir" / "gst" / "libx.so.p").mkdir(parents=True)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(harness_cpp.container.subprocess, "run", lambda cmd, **kw: (calls.append(cmd), subprocess.CompletedProcess(cmd, 0, "", ""))[1])
+    ctr = container.Container("img", "/src")
+    entry = {"directory": "/src/builddir", "file": "../gst/t.cpp", "output": "gst/libx.so.p/t.cpp.o"}
+    write_db(tmp_path, [{**entry, "arguments": ["clang++", "-std=c++20", "-c", "../gst/t.cpp", "-o", "gst/libx.so.p/t.cpp.o"]}])
+    assert harness_cpp.build_harness(ctr, tmp_path, "gst/t.cpp", "f()", ".flowdiff/run/h", 30) == (".flowdiff/run/h/harness", "")
+    compile_cmd = [c for c in calls if "readelf" not in c][0]
+    assert compile_cmd[compile_cmd.index("img") + 1:][:2] == ["clang++", "-std=c++20"]
+    calls.clear()
+    write_db(tmp_path, [entry])
+    assert harness_cpp.build_harness(ctr, tmp_path, "gst/t.cpp", "f()", ".flowdiff/run/h", 30) == (".flowdiff/run/h/harness", "")
+    compile_cmd = [c for c in calls if "readelf" not in c][0]
+    assert compile_cmd[compile_cmd.index("img") + 1:][:2] == ["c++", "-g"]
 
 
 def test_harvest_prefers_test_call_sites_with_literals(tmp_path: Path):

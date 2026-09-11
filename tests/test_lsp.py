@@ -276,7 +276,9 @@ def test_send_frames_messages_with_a_content_length_header(tmp_path: Path):
         c.notify("test/framing", {"a": 1})
         payload = json.dumps({"jsonrpc": "2.0", "method": "test/framing",
                               "params": {"a": 1}}).encode()
-        assert written == [b"Content-Length: %d\r\n\r\n" % len(payload) + payload]
+        # The reader thread may answer the fake server's own requests through the same stub meanwhile.
+        ours = [frame for frame in written if b"test/framing" in frame]
+        assert ours == [b"Content-Length: %d\r\n\r\n" % len(payload) + payload]
     finally:
         c._proc.kill()
 
@@ -307,15 +309,15 @@ def test_location_from_lsp_accepts_both_shapes():
     assert Location.from_lsp(link).path == Path("/b.py")
 
 
-def test_find_compile_db_prefers_newest(tmp_path: Path):
-    old = tmp_path / "build-old"
-    new = tmp_path / "build-new"
-    for d in (old, new):
-        d.mkdir()
-        (d / "compile_commands.json").write_text("[]")
-    past = time.time() - 100
-    os.utime(old / "compile_commands.json", (past, past))
-    assert lsp.find_compile_db(tmp_path) == new / "compile_commands.json"
+def test_find_compile_db_is_the_containers_discovery(tmp_path: Path):
+    one = tmp_path / "build-old"
+    one.mkdir()
+    (one / "compile_commands.json").write_text("[]")
+    assert lsp.find_compile_db(tmp_path) == one / "compile_commands.json"
+    two = tmp_path / "build-new"
+    two.mkdir()
+    (two / "compile_commands.json").write_text("[]")
+    assert lsp.find_compile_db(tmp_path) == tmp_path / ".flowdiff" / "compile_commands.json"
     assert lsp.find_compile_db(tmp_path / "nowhere") is None
 
 
