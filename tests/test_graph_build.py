@@ -109,6 +109,29 @@ def test_build_graph_warns_only_for_uncalled_functions(tmp_path: Path):
     assert g.warnings == ["orphan: no caller found — add a hint rule?"]
 
 
+@pytest.mark.skipif(shutil.which("ast-grep") is None, reason="ast-grep not installed")
+def test_textual_callees_fill_in_when_outgoing_calls_are_unsupported(tmp_path: Path):
+    source = tmp_path / "gst" / "t.cpp"
+    source.parent.mkdir()
+    source.write_text("int helper(int x) { return x; }\n"
+                      "int crop(int v) {\n    auto p = ns::Transform::transform(v, 1);\n    return helper(v) + printf(\"x\") + obj->method(2);\n}\n"
+                      "int method(int) { return 0; }\n")
+    (tmp_path / "tests").mkdir()
+    crop = symbol("crop", source, 1, last=4, kind=12)
+    helper = symbol("helper", source, 0, last=0)
+    transform = symbol("ns::Transform::transform", tmp_path / "gst" / "u.cpp", 3)
+    method = symbol("method", tmp_path / "tests" / "test_t.cpp", 1)
+    syms = {"crop": crop, "helper": helper, "ns::Transform::transform": transform, "method": method}
+    client = FakeClient(tmp_path, syms, {}, language="cpp")
+    client.unsupported.add("callHierarchy/outgoingCalls")
+    g = graph.build_graph(client, changed(syms, ("crop", "body")), hops=3)
+    assert {g.nodes[e.dst].name for e in g.edges if e.src == crop.id} == {"helper", "ns::Transform::transform"}
+    assert any("callees come from call expressions" in w for w in g.warnings)
+    client.unsupported.clear()
+    g = graph.build_graph(client, changed(syms, ("crop", "body")), hops=3)
+    assert not any(e.src == crop.id for e in g.edges)
+
+
 def test_build_graph_tolerates_a_symbol_with_no_hierarchy(tmp_path: Path):
     syms = {"ghost": symbol("ghost", tmp_path / "other.py", 99)}
     client = FakeClient(tmp_path, {}, {})

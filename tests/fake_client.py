@@ -27,6 +27,7 @@ class FakeClient:
                                    references_need_open, import_kinds, test_function_prefix)
         self.opened: list[Path] = []
         self.prepared: list[str] = []
+        self.unsupported: set[str] = set()
 
     def _item(self, name: str) -> dict[str, Any]:
         s = self.symbols[name]
@@ -56,6 +57,9 @@ class FakeClient:
 
     def outgoing_calls(self, item: dict[str, Any]) -> list[dict[str, Any]]:
         return [{"to": self._item(c)} for c in self.calls.get(self._name_of(item), [])]
+
+    def workspace_symbols(self, query: str) -> list[Symbol]:
+        return [s for s in self.symbols.values() if s.name.rsplit("::", 1)[-1] == query]
 
     def references(self, path: Path, pos: Position) -> list[Location]:
         for name, s in self.symbols.items():

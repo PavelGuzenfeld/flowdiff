@@ -135,7 +135,8 @@ def recorded(repo: Path) -> None:
     (run / "h.jsonl").write_text(json.dumps({"seq": 1, "event": "enter", "frame": "lib.py:f", "args": {"x": 1}}) + "\n"
                                  + json.dumps({"seq": 2, "event": "exit", "frame": "lib.py:f", "return": 3}) + "\n")
     (run / "index.json").write_text(json.dumps([{"flow": 1, "frames": ["lib.py:f", "lib.py:g"],
-                                                 "base": str(run / "b.jsonl"), "head": str(run / "h.jsonl")}]))
+                                                 "base": str(run / "b.jsonl"), "head": str(run / "h.jsonl"),
+                                                 "names": {"lib.py:f": "f", "lib.py:g": "g"}}]))
 
 
 def test_show_prints_the_frame_and_narrows_by_argument(repo: Path, capsys):

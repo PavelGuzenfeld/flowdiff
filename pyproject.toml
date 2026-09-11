@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "flowdiff"
 version = "0.0.1"
 description = "Turn a code change into a runnable, comparable flow: LSP call graph of the changed symbols, a harness that drives it, a before/after trace."
+readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
 dependencies = []

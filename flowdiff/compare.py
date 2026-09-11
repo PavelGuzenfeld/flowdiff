@@ -197,12 +197,13 @@ def verdict(report: Report) -> str:
 
 
 def short(frame: str) -> str:
-    return frame.rsplit(":", 1)[-1]
+    """The symbol without its path: the part after the path's colon, so C++ Class::method survives whole."""
+    return frame.split(":", 1)[1] if ":" in frame else frame
 
 
 def resolve(report: Report, query: str) -> list[str]:
-    """`name`, `path:name`, or `name/arg`; the arg part is stripped by the caller."""
-    return [f for f in report.frames if f == query or short(f) == query]
+    """A frame id, its symbol, or the symbol's last :: component; the /arg part is stripped by the caller."""
+    return [f for f in report.frames if query in (f, short(f), short(f).rsplit("::", 1)[-1])]
 
 
 def call_rows(b: dict[str, Any], h: dict[str, Any], path: str | None) -> list[tuple[str, str, str]]:

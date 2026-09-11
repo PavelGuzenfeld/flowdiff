@@ -61,6 +61,169 @@ def test_call_hierarchy_roundtrip(client: LspClient, tmp_path: Path):
     assert client.outgoing_calls(items[0]) == []
 
 
+def test_outgoing_calls_unsupported_by_the_server_is_an_empty_list_asked_once(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("FAKE_NO_OUTGOING", "1")
+    c = LspClient(fake_config(), tmp_path, timeout=5)
+    try:
+        path = tmp_path / "m.py"
+        c.open(path, "")
+        items = c.prepare_call_hierarchy(path, Position(1, 8))
+        assert c.outgoing_calls(items[0]) == [] and c.unsupported == {"callHierarchy/outgoingCalls"}
+        before = c._next_id
+        assert c.outgoing_calls(items[0]) == [] and c._next_id == before
+        assert c.incoming_calls(items[0])
+    finally:
+        c.close()
+
+
+def test_wait_for_index_returns_at_once_when_the_server_reports_no_progress(client: LspClient):
+    assert client.wait_for_index(timeout=5, grace=0.2) is True
+
+
+def test_wait_for_index_blocks_until_the_background_index_ends(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("FAKE_INDEXING", "1")
+    c = LspClient(fake_config(), tmp_path, timeout=5)
+    try:
+        assert c.wait_for_index(timeout=0.3) is False
+        c.request("test/indexed", None)
+        assert c.wait_for_index(timeout=5) is True
+    finally:
+        c.close()
+
+
+def settled_state(client: LspClient) -> dict:
+    """The client answers the server's configuration request from its read thread, so it can reach the
+    fake server after a request sent from the test thread; ask until that reply has landed."""
+    for _ in range(50):
+        state = client.request("test/state", None)
+        if state["config_reply"] is not None:
+            return state
+    raise AssertionError("configuration reply never reached the server")
+
+
+def test_the_client_advertises_exactly_the_capabilities_it_relies_on(client: LspClient, tmp_path: Path):
+    client.open(tmp_path / "m.py", "print(1)\n")
+    client.references(tmp_path / "m.py", Position(1, 8))
+    state = settled_state(client)
+    caps = state["init"]["capabilities"]
+    assert caps["textDocument"]["documentSymbol"] == {"hierarchicalDocumentSymbolSupport": True}
+    assert caps["textDocument"]["callHierarchy"] == {"dynamicRegistration": False}
+    assert caps["window"] == {"workDoneProgress": True}
+    assert state["init"]["rootUri"] == tmp_path.resolve().as_uri() and state["init"]["processId"] is None
+    assert state["open"] == {"uri": (tmp_path / "m.py").resolve().as_uri(), "languageId": "python", "version": 1,
+                             "text": "print(1)\n"}
+    assert state["references"]["context"] == {"includeDeclaration": False}
+    assert state["config_reply"] == [None, None]
+
+
+def test_request_ids_start_at_one_and_step_by_one(client: LspClient):
+    """initialize took id 1; every request after it takes the next integer."""
+    assert client._next_id == 1 and client.timeout == 5
+    client.request("test/state", None)
+    client.request("test/state", None)
+    assert client._next_id == 3
+
+
+def test_default_timeout_is_sixty_seconds(tmp_path: Path):
+    c = LspClient(fake_config(), tmp_path)
+    try:
+        assert c.timeout == 60.0
+    finally:
+        c.close()
+
+
+def test_a_server_request_the_client_does_not_know_is_answered_with_null(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("FAKE_INDEXING", "1")
+    c = LspClient(fake_config(), tmp_path, timeout=5)
+    try:
+        c.request("test/indexed", None)
+        for _ in range(50):
+            state = c.request("test/state", None)
+            if state["progress_reply"] != "unset":
+                break
+        assert state["progress_reply"] is None
+    finally:
+        c.close()
+
+
+def test_headers_other_than_content_length_are_skipped(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("FAKE_EXTRA_HEADER", "1")
+    c = LspClient(fake_config(), tmp_path, timeout=5)
+    try:
+        assert settled_state(c)["config_reply"] == [None, None]
+        c.open(tmp_path / "m.py", "")
+        assert [s.name for s in c.document_symbols(tmp_path / "m.py")] == ["C", "m"]
+    finally:
+        c.close()
+
+
+def test_outgoing_calls_are_returned_when_the_server_has_them(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("FAKE_OUTGOING", "1")
+    c = LspClient(fake_config(), tmp_path, timeout=5)
+    try:
+        path = tmp_path / "m.py"
+        c.open(path, "")
+        items = c.prepare_call_hierarchy(path, Position(1, 8))
+        callees = c.outgoing_calls(items[0])
+        assert [lsp.item_symbol(x["to"]).name for x in callees] == ["callee"] and c.unsupported == set()
+        assert lsp.item_symbol({**callees[0]["to"], "detail": "(int)"}).detail == "(int)"
+    finally:
+        c.close()
+
+
+def test_flatten_records_named_namespaces_and_skips_anonymous_ones():
+    r = {"start": {"line": 0, "character": 0}, "end": {"line": 9, "character": 0}}
+    tree = {"name": "nvmm", "kind": 3, "range": r, "selectionRange": r, "children": [
+        {"name": "(anonymous namespace)", "kind": 3, "range": r, "selectionRange": r, "children": [
+            {"name": "helper", "kind": 12, "range": r, "selectionRange": r}]},
+        {"name": "Klass", "kind": 5, "range": r, "selectionRange": r, "children": [
+            {"name": "method", "kind": 6, "range": r, "selectionRange": r}]},
+        {"name": "free", "kind": 12, "range": r, "selectionRange": r}]}
+    out: list[lsp.Symbol] = []
+    lsp.LspClient.__new__(lsp.LspClient)._flatten(tree, Path("/f.cpp"), out)
+    assert lsp.NAMESPACE_KIND == 3
+    assert [(s.name, s.namespaces) for s in out] == [("nvmm", ()), ("(anonymous namespace)", ("nvmm",)),
+                                                    ("helper", ("nvmm",)), ("Klass", ("nvmm",)), ("method", ("nvmm",)),
+                                                    ("free", ("nvmm",))]
+    bare = lsp.Symbol("f", 12, "", lsp.Range.from_lsp(r), lsp.Range.from_lsp(r), Path("/f.cpp"))
+    assert bare.nested is False and bare.namespaces == ()
+
+
+def test_server_for_in_a_container_runs_clangd_through_docker_with_uri_rewriting(tmp_path: Path):
+    from flowdiff import container
+    cfg = lsp.server_for(Path("x.cpp"), tmp_path, container.Container("flowdiff/p:dev", "/src"))
+    assert cfg is not None and cfg.command[0] == "docker" and cfg.command[-3:] == ["clangd", "--background-index", "--compile-commands-dir=/src/builddir"]
+    assert cfg.command_prefix[-1] == "flowdiff/p:dev" and "-i" in cfg.command_prefix
+    assert cfg.uri_map == (tmp_path.resolve().as_uri(), "file:///src")
+    assert (tmp_path / ".flowdiff" / "clangd-cache").is_dir()
+    assert any(v.endswith(":/src/.cache") for v in cfg.command_prefix)
+
+
+def test_a_method_not_found_error_is_its_own_exception(client: LspClient):
+    with pytest.raises(lsp.LspUnsupported):
+        client.request("test/unsupported", None)
+    assert lsp.METHOD_NOT_FOUND == -32601
+
+
+def test_container_config_prefixes_the_command_and_rewrites_uris_both_ways():
+    cfg = lsp.ServerConfig("cpp", "clangd", ("--x",), lsp.CPP_EXTENSIONS, "cpp",
+                           command_prefix=("docker", "run", "--rm", "-i", "img"),
+                           uri_map=("file:///home/me/proj", "file:///src"))
+    assert cfg.command == ["docker", "run", "--rm", "-i", "img", "clangd", "--x"]
+    assert cfg.to_server('{"uri": "file:///home/me/proj/a.cpp"}') == '{"uri": "file:///src/a.cpp"}'
+    assert cfg.from_server('{"uri": "file:///src/a.cpp", "o": "file:///usr/include/x.h"}') \
+        == '{"uri": "file:///home/me/proj/a.cpp", "o": "file:///usr/include/x.h"}'
+    plain = lsp.ServerConfig("cpp", "clangd", (), lsp.CPP_EXTENSIONS, "cpp")
+    assert plain.to_server("x") == "x" and plain.from_server("y") == "y" and plain.command == ["clangd"]
+
+
+def test_workspace_symbols_keep_only_located_items(client: LspClient, tmp_path: Path):
+    client.open(tmp_path / "m.py", "")
+    found = client.workspace_symbols("m")
+    assert [(s.name, s.kind, s.detail, s.range.start.line) for s in found] == [("m", 6, "C", 1)]
+    assert found[0].path == (tmp_path / "m.py").resolve()
+
+
 def test_references_and_definition_locations(client: LspClient, tmp_path: Path):
     path = tmp_path / "m.py"
     client.open(path, "")

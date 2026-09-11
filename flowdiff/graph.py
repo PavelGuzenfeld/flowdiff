@@ -24,6 +24,11 @@ class Node:
     line: int
     col: int
     status: str = "unchanged"  # unchanged | body | signature | added | removed | slot
+    namespaces: tuple[str, ...] = ()
+
+    @property
+    def qualified(self) -> str:
+        return "::".join([*self.namespaces, self.name])
 
     @property
     def marker(self) -> str:
@@ -73,7 +78,8 @@ class Flow:
 
 
 def node_of(sym: Symbol, status: str = "unchanged") -> Node:
-    return Node(sym.id, sym.name, sym.path, sym.selection.start.line, sym.selection.start.character, status)
+    return Node(sym.id, sym.name, sym.path, sym.selection.start.line, sym.selection.start.character, status,
+                sym.namespaces)
 
 
 def build_graph(client: LspClient, changed: list[ChangedSymbol], hops: int) -> Graph:
@@ -115,6 +121,10 @@ def build_graph(client: LspClient, changed: list[ChangedSymbol], hops: int) -> G
             frontier.append((dst.id, depth + 1))
 
     add_hint_edges(client, g)
+    if "callHierarchy/outgoingCalls" in getattr(client, "unsupported", ()):
+        add_textual_callees(client, g, changed)
+        g.warnings.append(f"{client.config.binary} has no callHierarchy/outgoingCalls; "
+                          "callees come from call expressions in the changed bodies")
     for c in changed:
         if c.symbol.is_function and not c.symbol.nested and c.status != "removed" and not g.callers(c.symbol.id):
             g.warnings.append(f"{c.symbol.name}: no caller found — add a hint rule?")
@@ -160,6 +170,32 @@ def add_hint_edges(client: LspClient, g: Graph) -> None:
                                                slot["range"]["start"]["line"],
                                                slot["range"]["start"]["column"], "slot"))
                         g.edges.add(Edge(slot_node.id, target.id, "registered"))
+
+
+CALL_KINDS = {"cpp": ("call_expression",), "python": ("call",)}
+
+
+def add_textual_callees(client: LspClient, g: Graph, changed: list[ChangedSymbol]) -> None:
+    """Direct callees of each changed body by ast-grep call expressions resolved through workspace/symbol;
+    the fallback when the server cannot answer outgoingCalls (clangd before 17)."""
+    language = client.config.ast_grep_language
+    for c in changed:
+        if c.status == "removed" or not c.symbol.is_function:
+            continue
+        text = c.symbol.path.read_text(encoding="utf-8", errors="replace")
+        body = c.symbol.range.slice(text)
+        names: list[str] = []
+        for match in scan_kinds(language, c.symbol.path.suffix, body, CALL_KINDS.get(language, ())):
+            callee = match["text"].split("(", 1)[0].strip().rsplit("::", 1)[-1].rsplit(".", 1)[-1].rsplit("->", 1)[-1]
+            if callee.isidentifier() and callee not in names and callee != c.symbol.name.rsplit("::", 1)[-1]:
+                names.append(callee)
+        for name in names:
+            for sym in client.workspace_symbols(name):
+                if sym.name.rsplit("::", 1)[-1] == name and sym.is_function and sym.path.is_relative_to(client.root) \
+                        and not is_test_path(sym.path, client.root):
+                    dst = g.add(node_of(sym))
+                    g.edges.add(Edge(c.symbol.id, dst.id))
+                    break
 
 
 def run_ast_grep(rule: Path, root: Path) -> list[dict[str, Any]]:

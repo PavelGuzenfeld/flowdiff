@@ -109,6 +109,93 @@ def emit(module: str, name: str, found: list[tuple[str, str, bool]], dialect: st
     return HEADER + "\n".join(imports) + "\n\n\n" + "\n".join(body).rstrip("\n") + "\n"
 
 
+CPP_SUFFIXES = (".cpp", ".cc", ".cxx", ".c")
+
+
+def detect_cpp_dialect(test_dir: Path) -> tuple[str, str]:
+    """(dialect, include line) in decision 48's order: the repo's own harness header, gtest, Catch2, doctest."""
+    texts = [p.read_text(encoding="utf-8", errors="replace") for p in sorted(test_dir.glob("**/*"))
+             if p.suffix in CPP_SUFFIXES or p.suffix in (".h", ".hpp")] if test_dir.is_dir() else []
+    local = [m.group(1) for t in texts for m in re.finditer(r'^#include\s+"([^"]*test_harness[^"]*)"', t, re.M)]
+    if local:
+        return "harness", f'#include "{local[0]}"'
+    if any("gtest/gtest.h" in t for t in texts):
+        return "gtest", "#include <gtest/gtest.h>"
+    if any("catch2/" in t or "catch.hpp" in t for t in texts):
+        return "catch2", "#include <catch2/catch_test_macros.hpp>"
+    if any("doctest.h" in t for t in texts):
+        return "doctest", "#include <doctest/doctest.h>"
+    return "plain", "#include <cassert>"
+
+
+def cpp_literal(value: object) -> str | None:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    if isinstance(value, str):
+        return json.dumps(value)
+    if value is None:
+        return "nullptr"
+    return None
+
+
+def cpp_cases(name: str, calls: list[compare.Call]) -> list[tuple[str, list[tuple[str, str]]]]:
+    """(call expression, [(member path, literal)]) per distinct call whose arguments are all scalars;
+    a struct return is asserted one field level down, a scalar return as a whole."""
+    out: list[tuple[str, list[tuple[str, str]]]] = []
+    for call in calls:
+        args = [cpp_literal(v) for v in call.args.values()]
+        if call.raises is not None or call.result is compare.MISSING or any(a is None for a in args):
+            continue
+        source = f"{name}({', '.join(a for a in args if a is not None)})"
+        result = call.result
+        if isinstance(result, dict) and "fields" in result:
+            checks = [(f".{k}", lit) for k, v in result["fields"].items() if (lit := cpp_literal(v)) is not None]
+        else:
+            lit = cpp_literal(result)
+            checks = [("", lit)] if lit is not None else []
+        if checks and (source, checks) not in out:
+            out.append((source, checks))
+    return out[:MAX_CASES]
+
+
+def emit_cpp(source_include: str, name: str, found: list, dialect: str, include: str) -> str:
+    short = name.rsplit("::", 1)[-1]
+    lines = [f"// {HEADER.strip().strip(chr(34))}", f'#include "{source_include}"', include, ""]
+    macro = {"harness": "TEST({n})", "gtest": "TEST(FlowKeep, {n})", "catch2": 'TEST_CASE("{n}")',
+             "doctest": 'TEST_CASE("{n}")'}.get(dialect)
+    check = {"harness": "ASSERT_EQ({a}, {b});", "gtest": "EXPECT_EQ({a}, {b});", "catch2": "CHECK({a} == {b});",
+             "doctest": "CHECK({a} == {b});"}.get(dialect, "assert({a} == {b});")
+    for i, (call, checks) in enumerate(found, 1):
+        case = f"flow_{short}_{i}"
+        body = [f"    auto result = {call};"] + [f"    {check.format(a='result' + member, b=lit)}" for member, lit in checks]
+        if macro:
+            lines += [macro.format(n=case) + " {", *body, "}", ""]
+        else:
+            lines += [f"static void {case}() {{", *body, "}", ""]
+    if not macro:
+        lines += ["int main() {", *[f"    flow_{short}_{i}();" for i in range(1, len(found) + 1)], "    return 0;", "}", ""]
+    return "\n".join(lines)
+
+
+def keep_cpp(root: Path, full: str, calls: list[compare.Call], qualified: str | None = None) -> int:
+    path, name = full.split(":", 1)
+    found = cpp_cases(qualified or name, calls)
+    if not found:
+        print(f"{full}: no recorded call has scalar arguments and an assertable return; nothing to keep", file=sys.stderr)
+        return cli.EXIT_NOTHING
+    test_dir = test_dir_of(root)
+    test_dir.mkdir(exist_ok=True)
+    dialect, include = detect_cpp_dialect(test_dir)
+    short = name.rsplit("::", 1)[-1]
+    target = test_dir / f"flow_{short}.cpp"
+    header = Path(path).with_suffix(".hpp").name if (root / Path(path).with_suffix(".hpp")).is_file() else Path(path).name
+    target.write_text(emit_cpp(header, name, found, dialect, include))
+    print(f"{target.relative_to(root)}: {len(found)} case(s), {dialect} dialect; add it to the build to run it")
+    return cli.EXIT_OK
+
+
 def run(args: argparse.Namespace) -> int:
     root = cli.repo_root(args.repo)
     if root is None:
@@ -129,7 +216,9 @@ def run(args: argparse.Namespace) -> int:
     for entry in entries:
         report = compare.Report(entry["frames"], {}, compare.load(Path(entry["head"])))
         for full in compare.resolve(report, frame):
-            path, name = full.rsplit(":", 1)
+            path, name = full.split(":", 1)   # C++ names carry ::, so split at the path's colon, not the last
+            if Path(path).suffix in CPP_SUFFIXES:
+                return keep_cpp(root, full, report.head.get(full, []), entry.get("names", {}).get(full))
             module = harness_py.module_name(root, root / path)
             found = cases(module, name, report.head.get(full, []))
             if not found:
