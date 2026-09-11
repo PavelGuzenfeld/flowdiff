@@ -59,28 +59,28 @@ def cmake_tree(tmp_path: Path) -> Path:
     (pkg / "util_test").write_text("")
     (pkg / "liblibutil.so").write_text("")
     (pkg / "compile_commands.json").write_text(json.dumps([
-        {"directory": "/rocx/build/pkg", "file": "/rocx/pkg/test/util_test.cpp",
-         "command": "/usr/bin/c++ -I/rocx/pkg/include -std=gnu++17 -o CMakeFiles/util_test.dir/test/util_test.cpp.o -c /rocx/pkg/test/util_test.cpp"},
-        {"directory": "/rocx/build/pkg", "file": "/rocx/pkg/src/util.cpp",
-         "command": "/usr/bin/c++ -I/rocx/pkg/include -std=gnu++17 -o CMakeFiles/libutil.dir/src/util.cpp.o -c /rocx/pkg/src/util.cpp"}]))
+        {"directory": "/ws/build/pkg", "file": "/ws/pkg/test/util_test.cpp",
+         "command": "/usr/bin/c++ -I/ws/pkg/include -std=gnu++17 -o CMakeFiles/util_test.dir/test/util_test.cpp.o -c /ws/pkg/test/util_test.cpp"},
+        {"directory": "/ws/build/pkg", "file": "/ws/pkg/src/util.cpp",
+         "command": "/usr/bin/c++ -I/ws/pkg/include -std=gnu++17 -o CMakeFiles/libutil.dir/src/util.cpp.o -c /ws/pkg/src/util.cpp"}]))
     return tmp_path
 
 
 def test_test_executables_follow_cmake_object_directories(tmp_path: Path):
     tree = cmake_tree(tmp_path)
-    assert harness_cpp.test_executables(tree, ["pkg/test/util_test.cpp", "pkg/src/util.cpp"], "/rocx") == {
+    assert harness_cpp.test_executables(tree, ["pkg/test/util_test.cpp", "pkg/src/util.cpp"], "/ws") == {
         "pkg/test/util_test.cpp": "build/pkg/util_test"}
-    entry = harness_cpp.compile_entry(tree, "pkg/src/util.cpp", "/rocx")
-    assert entry is not None and entry["file"] == "/rocx/pkg/src/util.cpp"
-    objects, name = harness_cpp.target_of(tree, entry, "/rocx")
+    entry = harness_cpp.compile_entry(tree, "pkg/src/util.cpp", "/ws")
+    assert entry is not None and entry["file"] == "/ws/pkg/src/util.cpp"
+    objects, name = harness_cpp.target_of(tree, entry, "/ws")
     assert (objects, name) == (tree / "build" / "pkg" / "CMakeFiles" / "libutil.dir", "libutil")
     assert harness_cpp.artefact_of(objects, name) == tree / "build" / "pkg" / "liblibutil.so"
-    test_entry = harness_cpp.compile_entry(tree, "pkg/test/util_test.cpp", "/rocx")
-    objects, name = harness_cpp.target_of(tree, test_entry, "/rocx")
+    test_entry = harness_cpp.compile_entry(tree, "pkg/test/util_test.cpp", "/ws")
+    objects, name = harness_cpp.target_of(tree, test_entry, "/ws")
     assert name == "util_test" and harness_cpp.artefact_of(objects, name) == tree / "build" / "pkg" / "util_test"
-    assert harness_cpp.host_dir(tree, {"directory": "/rocx/build/pkg"}, "/rocx") == tree / "build" / "pkg"
-    assert harness_cpp.host_dir(tree, {"directory": "/rocx"}, "/rocx") == tree
-    assert harness_cpp.host_dir(tree, {"directory": "/elsewhere"}, "/rocx") == Path("/elsewhere")
+    assert harness_cpp.host_dir(tree, {"directory": "/ws/build/pkg"}, "/ws") == tree / "build" / "pkg"
+    assert harness_cpp.host_dir(tree, {"directory": "/ws"}, "/ws") == tree
+    assert harness_cpp.host_dir(tree, {"directory": "/elsewhere"}, "/ws") == Path("/elsewhere")
 
 
 @pytest.mark.parametrize("text,expected", [
