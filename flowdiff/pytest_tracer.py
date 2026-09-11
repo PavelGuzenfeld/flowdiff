@@ -22,6 +22,16 @@ def pytest_sessionstart(session: Any) -> None:
     _tracer = tracer
 
 
+def pytest_runtest_logstart(nodeid: str, location: Any) -> None:
+    if _tracer is not None:
+        _tracer.context = nodeid
+
+
+def pytest_runtest_logfinish(nodeid: str, location: Any) -> None:
+    if _tracer is not None:
+        _tracer.context = None
+
+
 def pytest_sessionfinish(session: Any, exitstatus: int) -> None:
     global _tracer
     if _tracer is not None:

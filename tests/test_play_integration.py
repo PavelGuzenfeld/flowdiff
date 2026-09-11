@@ -47,6 +47,9 @@ def test_show_after_play_differs_exactly_where_the_edit_differs(played: Path, ca
                                                     "  1 identical call(s): #1"]
     assert cli.main(["show", "clamp/ceiling", "--repo", str(played)]) == 0
     assert capsys.readouterr().out.splitlines()[1:] == ["  calls #1", "    ceiling  100  →  100"]
+    assert cli.main(["show", "scale#1", "--repo", str(played)]) == 0
+    assert capsys.readouterr().out.splitlines() == ["lib.py:scale  call #1", "    value   4  →  4",
+                                                    "    return  8  →  12   *"]
 
 
 def test_play_depth_prints_values_inline_and_fail_on_diff_exits_3(played: Path, capsys):
@@ -78,6 +81,8 @@ def test_play_falls_back_to_the_covering_tests_when_nothing_lifts(project: Path,
     assert "1 of 2 frames differ: scale (return); origin scale" in captured.out
     assert "tests/test_lib.py::test_scale  PASS→FAIL" in captured.out
     assert "driving tests changed" not in captured.err
+    assert cli.main(["show", "scale", "--repo", str(project)]) == 0
+    assert capsys.readouterr().out.splitlines()[1] == "  calls #1  ← tests/test_lib.py::test_scale"
     (project / "tests" / "test_lib.py").write_text(
         "from lib import scale\n\nFOUR = 5\n\n\ndef test_scale():\n    assert scale(FOUR) == 8\n")
     assert cli.main(["play", "--repo", str(project)]) == 0

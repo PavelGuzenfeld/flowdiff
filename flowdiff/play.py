@@ -205,11 +205,18 @@ def show(args: argparse.Namespace) -> int:
         print("nothing recorded; run flowdiff play first", file=sys.stderr)
         return cli.EXIT_NOTHING
     query, _, arg = args.frame.partition("/")
+    query, _, call = query.partition("#")
+    if call and not call.isdigit():
+        print(f"{args.frame}: the call selector after # must be a number", file=sys.stderr)
+        return cli.EXIT_TOOL_ERROR
     shown = 0
     for entry in json.loads(index_path.read_text()):
         report = compare.Report(entry["frames"], compare.load(Path(entry["base"])), compare.load(Path(entry["head"])))
         for frame in compare.resolve(report, query):
-            print(compare.show(report, frame, arg or None))
+            if call:
+                print(compare.show_call(report, frame, int(call) - 1, arg or None))
+            else:
+                print(compare.show(report, frame, arg or None))
             shown += 1
     if not shown:
         print(f"{query}: not a frame of the last play", file=sys.stderr)

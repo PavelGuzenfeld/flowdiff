@@ -184,6 +184,41 @@ def test_show_caps_the_path_column_so_one_long_path_does_not_push_the_rest():
     assert lines[3] == "    d.s" + " " * (40 - 3) + "  1  →  2"
 
 
+def test_load_keeps_the_driving_test_of_each_call(tmp_path: Path):
+    calls = compare.load(write(tmp_path / "t.jsonl", {**enter("f", n=1), "test": "t.py::a"}, exit_("f", 1),
+                               enter("f", n=2), exit_("f", 2)))
+    assert [c.test for c in calls["f"]] == ["t.py::a", None]
+
+
+def test_show_labels_call_groups_with_the_tests_that_drove_them():
+    base = {"f": [compare.Call(1, {"x": 1}, 4, end=2, test="t.py::a"), compare.Call(3, {"x": 1}, 4, end=4, test="t.py::b"),
+                  compare.Call(5, {"x": 1}, 4, end=6, test="t.py::c"), compare.Call(7, {"x": 1}, 9, end=8, test="t.py::d")]}
+    head = {"f": [compare.Call(1, {"x": 1}, 5, end=2, test="t.py::a"), compare.Call(3, {"x": 1}, 5, end=4, test="t.py::b"),
+                  compare.Call(5, {"x": 1}, 5, end=6, test="t.py::c"), compare.Call(7, {"x": 1}, 9, end=8)]}
+    lines = compare.show(report(base, head), "f").splitlines()
+    assert lines[1] == "  calls #1-#3 (×3)  ← t.py::a, t.py::b, +1 more"
+    assert lines[3] == "  1 identical call(s): #4"
+    untested = {"f": [compare.Call(1, {"x": 1}, 4, end=2)]}
+    assert compare.show(report(untested, {"f": [compare.Call(1, {"x": 1}, 5, end=2)]}), "f").splitlines()[1] == "  calls #1"
+
+
+def test_show_call_prints_one_call_whole_and_marks_the_differing_rows():
+    base = {"f": [compare.Call(1, {"x": 1, "cfg": obj("Cfg", a=1)}, obj("Out", ok=True), end=2, test="t.py::a")]}
+    head = {"f": [compare.Call(1, {"x": 1, "cfg": obj("Cfg", a=1, n=True)}, obj("Out", ok=False), end=2, test="t.py::a")]}
+    r = report(base, head)
+    assert compare.show_call(r, "f", 0).splitlines() == [
+        "f  call #1  ← t.py::a",
+        "    x       1  →  1",
+        '    cfg     {"type": "Cfg", "fields": {"a": 1}}  →  {"type": "Cfg", "fields": {"a": 1, "n": true}}   *',
+        '    return  {"type": "Out", "fields": {"ok": true}}  →  {"type": "Out", "fields": {"ok": false}}   *']
+    assert compare.show_call(r, "f", 0, "cfg.n").splitlines()[1] == "    cfg.n  —  →  true   *"
+    assert compare.show_call(r, "f", 0, "return.ok").splitlines()[1] == "    return.ok  true  →  false   *"
+    assert compare.show_call(r, "f", 0, "nope").splitlines()[1] == "    nope: not an argument of this call"
+    assert compare.show_call(r, "f", 3) == "f  has no call #4"
+    only_head = compare.Report(["f"], {}, head)
+    assert compare.show_call(only_head, "f", 0).splitlines()[1] == "    x       —  →  1   *"
+
+
 def test_descend_follows_fields_and_indices_and_stops_at_missing():
     value = obj("Cfg", tags=["a", {"k": 7}], inner=obj("In", n=1))
     assert compare.descend(value, ".tags[1].k") == 7 and compare.descend(value, ".inner.n") == 1

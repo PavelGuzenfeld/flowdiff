@@ -59,7 +59,7 @@ def build_play_parser() -> argparse.ArgumentParser:
 
 def build_show_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="flowdiff show", description="values recorded by the last play")
-    parser.add_argument("frame", help="frame name, path:name, or frame/argument")
+    parser.add_argument("frame", help="frame, frame/leaf.path, frame#N for one call whole, frame#N/leaf.path")
     parser.add_argument("--repo", type=Path, default=Path.cwd())
     return parser
 

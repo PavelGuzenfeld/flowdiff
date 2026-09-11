@@ -24,6 +24,7 @@ class Call:
     result: Any = MISSING
     raises: str | None = None
     end: int | None = None
+    test: str | None = None
 
     def observed_at(self, field_name: str) -> int:
         return self.end if field_name in ("return", "raises") and self.end is not None else self.seq
@@ -47,7 +48,7 @@ def load(path: Path) -> dict[str, list[Call]]:
         rec = json.loads(line)
         frame = rec["frame"]
         if rec["event"] == "enter":
-            call = Call(rec["seq"], rec.get("args", {}))
+            call = Call(rec["seq"], rec.get("args", {}), test=rec.get("test"))
             calls.setdefault(frame, []).append(call)
             open_calls.setdefault(frame, []).append(call)
         elif open_calls.get(frame):
@@ -209,6 +210,29 @@ def call_labels(indices: list[int]) -> str:
     return ",".join(f"#{r[0] + 1}" if len(r) == 1 else f"#{r[0] + 1}-#{r[-1] + 1}" for r in runs)
 
 
+MAX_TESTS_IN_LABEL = 2
+
+
+def tests_of(report: Report, frame: str, indices: list[int]) -> str:
+    """The tests that drove these calls, from either side, or empty when no test drove them."""
+    names: list[str] = []
+    for i in indices:
+        for side in (report.head, report.base):
+            calls = side.get(frame, [])
+            test = calls[i].test if i < len(calls) else None
+            if test and test not in names:
+                names.append(test)
+    if not names:
+        return ""
+    shown = ", ".join(names[:MAX_TESTS_IN_LABEL])
+    return "  ← " + shown + (f", +{len(names) - MAX_TESTS_IN_LABEL} more" if len(names) > MAX_TESTS_IN_LABEL else "")
+
+
+def table(rows: list[tuple[str, str, str]]) -> list[str]:
+    width = min(max(len(r[0]) for r in rows), PATH_COLUMN)
+    return [f"    {p:<{width}}  {bv}  →  {hv}" for p, bv, hv in rows]
+
+
 def show(report: Report, frame: str, path: str | None = None) -> str:
     base, head = report.base.get(frame, []), report.head.get(frame, [])
     lines = [f"{frame}  base {len(base)} call(s), head {len(head)} call(s)"]
@@ -219,9 +243,29 @@ def show(report: Report, frame: str, path: str | None = None) -> str:
         groups.setdefault(tuple(call_rows(b, h, path)), []).append(i)
     identical = groups.pop((), [])
     for rows, indices in groups.items():
-        lines.append(f"  calls {call_labels(indices)}" + (f" (×{len(indices)})" if len(indices) > 1 else ""))
-        width = min(max(len(r[0]) for r in rows), PATH_COLUMN)
-        lines += [f"    {p:<{width}}  {bv}  →  {hv}" for p, bv, hv in rows]
+        count = f" (×{len(indices)})" if len(indices) > 1 else ""
+        lines.append(f"  calls {call_labels(indices)}{count}{tests_of(report, frame, indices)}")
+        lines += table(list(rows))
     if identical:
         lines.append(f"  {len(identical)} identical call(s): {call_labels(identical)}")
     return "\n".join(lines)
+
+
+def show_call(report: Report, frame: str, index: int, path: str | None = None) -> str:
+    """One call whole: every argument and the return on both sides, differing rows marked."""
+    base, head = report.base.get(frame, []), report.head.get(frame, [])
+    if index >= max(len(base), len(head)):
+        return f"{frame}  has no call #{index + 1}"
+    b = base[index].values() if index < len(base) else {}
+    h = head[index].values() if index < len(head) else {}
+    keys = [k for k in b if k not in ("return", "raises")] + [k for k in h if k not in b and k not in ("return", "raises")]
+    keys += [k for k in ("raises", "return") if k in b or k in h]
+    rows = []
+    for key in keys:
+        if path is not None and not (path == key or path.startswith(key + ".") or path.startswith(key + "[")):
+            continue
+        rest = path[len(key):] if path is not None else ""
+        bv, hv = descend(b.get(key, MISSING), rest), descend(h.get(key, MISSING), rest)
+        rows.append((path or key, value_text(bv, whole=True), value_text(hv, whole=True) + ("" if bv == hv else "   *")))
+    lines = [f"{frame}  call #{index + 1}{tests_of(report, frame, [index])}"]
+    return "\n".join(lines + (table(rows) if rows else [f"    {path}: not an argument of this call"]))
