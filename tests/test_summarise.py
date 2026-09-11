@@ -37,6 +37,22 @@ def test_without_a_tree_strings_are_untouched():
     assert summarise.summarise("/t/m.py") == "/t/m.py"
 
 
+def test_dict_keys_are_relabelled_like_values():
+    summarise.load_project_summariser("/t")
+    assert summarise.summarise({"/t/a.py": 1, 2: "/t/b.py"}) == {"<tree>/a.py": 1, "2": "<tree>/b.py"}
+
+
+class WithPrivates:
+    def __init__(self):
+        self.public = 1
+        self._handle = object()
+        self.__mangled = 2
+
+
+def test_private_attributes_are_left_out_of_object_fields():
+    assert summarise.summarise(WithPrivates()) == {"type": "test_summarise.WithPrivates", "fields": {"public": 1}}
+
+
 def test_a_freshly_imported_module_summarises_without_any_setup():
     fresh = importlib.reload(summarise)
     assert fresh.summarise("/t/m.py") == "/t/m.py" and fresh.summarise(Plain())["type"].endswith("Plain")

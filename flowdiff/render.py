@@ -56,7 +56,8 @@ def indented_tree(flow: Flow) -> str:
     return "\n".join(out)
 
 
-def verdict(flow: Flow) -> str:
+def verdict(flow: Flow, note: str | None = None) -> str:
+    """`note` replaces the two-body wording once play knows what actually drove the flow."""
     names = [f"{n.name}{n.marker}" for n in flow.changed]
     shown = ", ".join(names[:MAX_NAMES_IN_VERDICT])
     if len(names) > MAX_NAMES_IN_VERDICT:
@@ -64,7 +65,7 @@ def verdict(flow: Flow) -> str:
     if all(n.status == "added" for n in flow.changed) and flow.entry is None:
         head = f"{len(names)} new symbols, nothing older to enter from: {shown}"
     elif flow.entry is None:
-        head = f"no stable entry within {len(flow.frames)} frames of {shown}; two-body harness required"
+        head = f"no stable entry within {len(flow.frames)} frames of {shown}; {note or 'two-body harness required'}"
     else:
         head = f"entry {flow.entry.name}  ({len(flow.frames)} frames, {len(flow.changed)} changed: {shown})"
     tests = f"covered by {len(flow.tests)} test(s)" if flow.tests else "no covering tests"
@@ -79,13 +80,14 @@ def changed_by_file(flow: Flow) -> str:
     return "\n".join(f"  {p:<{width}}  {' '.join(names)}" for p, names in sorted(groups.items()))
 
 
-def render_flow(index: int, total: int, flow: Flow, full: bool = False, list_tests: bool = False) -> str:
+def render_flow(index: int, total: int, flow: Flow, full: bool = False, list_tests: bool = False,
+                note: str | None = None) -> str:
     title = f"flow {index}/{total}"
     if len(flow.frames) > MAX_GRAPH_NODES and not full:
         body = f"{changed_by_file(flow)}\n  ({len(flow.frames)} frames; graph omitted above {MAX_GRAPH_NODES}, --full draws it)"
     else:
         body = render_graph(flow)
-    parts = [title, body, verdict(flow)]
+    parts = [title, body, verdict(flow, note)]
     if list_tests and flow.tests:
         parts.append("\n".join(f"  {t}" for t in flow.tests))
     return "\n".join(parts)

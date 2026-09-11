@@ -86,12 +86,18 @@ def test_run_traced_tests_passes_the_plugin_and_accepts_failing_tests(tmp_path: 
         == "base: covering tests timed out after 0s"
 
 
-def test_test_delta_prints_before_and_after_per_test(tmp_path: Path, monkeypatch):
+def test_test_delta_names_what_matters_and_counts_the_rest(tmp_path: Path, monkeypatch):
+    before = {"a": "PASS", "b": "PASS", "c": "FAIL", "d": "ABSENT", "e": "ABSENT", "f": "PASS", "g": "FAIL"}
+    after = {"a": "FAIL", "b": "PASS", "c": "PASS", "d": "PASS", "e": "FAIL", "f": "PASS", "g": "FAIL"}
     seen = []
     monkeypatch.setattr(play, "run_tests", lambda i, tree, tests, t: seen.append(tree) or
-                        {tests[0]: "PASS" if tree.name == "base" else "FAIL"})
-    lines = play.test_delta(Path("py"), tmp_path / "base", tmp_path / "root", ["t.py::a"], 1)
-    assert lines == ["  t.py::a  PASS→FAIL"] and seen == [tmp_path / "base", tmp_path / "root"]
+                        {t: (before if tree.name == "base" else after)[t] for t in tests})
+    lines = play.test_delta(Path("py"), tmp_path / "base", tmp_path / "root", list(before), 1)
+    assert lines == ["  a  PASS→FAIL", "  c  FAIL→PASS", "  e  ABSENT→FAIL", "  g  FAIL→FAIL",
+                     "  1 ABSENT→PASS, 2 PASS→PASS"]
+    assert seen == [tmp_path / "base", tmp_path / "root"]
+    monkeypatch.setattr(play, "run_tests", lambda i, tree, tests, t: {t: "PASS" for t in tests})
+    assert play.test_delta(Path("py"), tmp_path / "base", tmp_path / "root", ["x", "y"], 1) == ["  2 PASS→PASS"]
 
 
 def test_run_harness_writes_the_trace_for_the_side(tmp_path: Path):
@@ -136,10 +142,9 @@ def test_show_prints_the_frame_and_narrows_by_argument(repo: Path, capsys):
     recorded(repo)
     assert cli.main(["show", "f", "--repo", str(repo)]) == 0
     out = capsys.readouterr().out
-    assert out.startswith("lib.py:f  base 1 call(s), head 1 call(s)\n") and "return" in out and "*" in out
+    assert out == "lib.py:f  base 1 call(s), head 1 call(s)\n  calls #1\n    return  2  →  3\n"
     assert cli.main(["show", "lib.py:f/x", "--repo", str(repo)]) == 0
-    out = capsys.readouterr().out
-    assert "x" in out and "return" not in out
+    assert capsys.readouterr().out.splitlines()[1:] == ["  calls #1", "    x  1  →  1"]
 
 
 def test_show_of_an_unknown_frame_is_exit_2(repo: Path, capsys):
