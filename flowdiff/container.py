@@ -66,11 +66,11 @@ class Container:
     workdir: str
 
     def command(self, tree: Path, args: list[str], interactive: bool = False,
-                mounts: list[tuple[Path, str]] = []) -> list[str]:
+                mounts: list[tuple[Path, str]] = [], cwd: str | None = None) -> list[str]:
         flags = ["--rm", "-i"] if interactive else ["--rm"]
         volumes = [f"{tree.resolve()}:{self.workdir}"] + [f"{host.resolve()}:{self.workdir}/{rel}" for host, rel in mounts]
         return ["docker", "run", *flags, "--user", f"{os.getuid()}:{os.getgid()}", "-e", "HOME=/tmp",
-                *[flag for v in volumes for flag in ("-v", v)], "-w", self.workdir, self.image, *args]
+                *[flag for v in volumes for flag in ("-v", v)], "-w", cwd or self.workdir, self.image, *args]
 
     def clangd_command(self, tree: Path, scratch: Path) -> list[str]:
         """clangd keeps its index under <project>/.cache; a mount points that at the scratch dir instead."""
@@ -78,8 +78,9 @@ class Container:
         cache.mkdir(parents=True, exist_ok=True)
         return self.command(tree, [], interactive=True, mounts=[(cache, ".cache")])
 
-    def run(self, tree: Path, args: list[str], timeout: float | None = None) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(self.command(tree, args), capture_output=True, text=True, timeout=timeout)
+    def run(self, tree: Path, args: list[str], timeout: float | None = None,
+            cwd: str | None = None) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(self.command(tree, args, cwd=cwd), capture_output=True, text=True, timeout=timeout)
 
     def path(self, tree: Path, host: Path) -> str:
         return self.workdir + "/" + host.resolve().relative_to(tree.resolve()).as_posix()

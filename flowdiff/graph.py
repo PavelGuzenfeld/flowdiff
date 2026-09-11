@@ -24,6 +24,11 @@ class Node:
     line: int
     col: int
     status: str = "unchanged"  # unchanged | body | signature | added | removed | slot
+    namespaces: tuple[str, ...] = ()
+
+    @property
+    def qualified(self) -> str:
+        return "::".join([*self.namespaces, self.name])
 
     @property
     def marker(self) -> str:
@@ -73,7 +78,8 @@ class Flow:
 
 
 def node_of(sym: Symbol, status: str = "unchanged") -> Node:
-    return Node(sym.id, sym.name, sym.path, sym.selection.start.line, sym.selection.start.character, status)
+    return Node(sym.id, sym.name, sym.path, sym.selection.start.line, sym.selection.start.character, status,
+                sym.namespaces)
 
 
 def build_graph(client: LspClient, changed: list[ChangedSymbol], hops: int) -> Graph:

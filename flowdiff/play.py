@@ -147,21 +147,25 @@ def python_plan(client: lsp.LspClient, g: graph.Graph, flow: graph.Flow, root: P
     return plan
 
 
-def cpp_plan(ctr: container.Container, flow: graph.Flow, root: Path, base: Path, out_dir: Path, index: int,
-             timeout: float, build_timeout: float) -> Plan:
-    """C++ flows are driven by the built test executables that reach them, traced under gdb in the container."""
+def cpp_plan(ctr: container.Container, client: lsp.LspClient, flow: graph.Flow, root: Path, base: Path,
+             out_dir: Path, index: int, timeout: float, build_timeout: float) -> Plan:
+    """A C++ flow is driven by a harness that includes the entry's TU and calls it with literal arguments
+    (decisions 20 to 24), else by the built test executables that reach it; either runs under gdb in the
+    container."""
     frames = [harness_cpp.frame_id(root, f) for f in flow.frames if f.status != "slot"]
     plan = Plan(frames)
     test_files = sorted({t.split("::")[0] for t in flow.tests})
     head_exes = harness_cpp.test_executables(root, test_files, ctr.workdir)
-    if not head_exes:
-        plan.stop = ("no built test executable reaches this flow; C++ flows are driven by their covering tests "
-                     "and the literal harness is not available yet")
+    literal = harness_cpp.harvest(client, root, flow.entry) if flow.entry is not None else None
+    if literal is None and not head_exes:
+        plan.stop = "no call site with literal arguments and no built test executable reaches this flow; nothing can drive it"
         return plan
     built: set[Path] = {root}
     traces = {side: out_dir / f"flow{index}.{side}.jsonl" for side in ("base", "head")}
     gdb_frames = harness_cpp.gdb_frames(root, flow)
     tests = harness_cpp.test_symbols(flow.tests)
+    entry_rel = harness_cpp.frame_id(root, flow.entry).split(":", 1)[0] if flow.entry is not None else ""
+    call = f"{flow.entry.qualified}({', '.join(literal)})" if flow.entry is not None and literal is not None else ""
 
     def ensure_built(tree: Path) -> str | None:
         if tree in built:
@@ -175,31 +179,41 @@ def cpp_plan(ctr: container.Container, flow: graph.Flow, root: Path, base: Path,
         failure = ensure_built(tree)
         if failure:
             return failure
-        exes = harness_cpp.test_executables(tree, test_files, ctr.workdir)
-        shared = [exes[f] for f in test_files if f in exes and f in head_exes]
-        if not shared:
-            return f"{side}: none of the covering test executables exist on this side"
         local = out_dir / f"flow{index}.{side}.gdb.jsonl" if tree == root else worktree.scratch_dir(tree) / "run" / f"flow{index}.jsonl"
-        (local.parent).mkdir(parents=True, exist_ok=True)
-        failure = harness_cpp.trace_tests(ctr, tree, shared, gdb_frames, tests, local, timeout)
+        local.parent.mkdir(parents=True, exist_ok=True)
+        if literal is not None:
+            built_harness = harness_cpp.build_harness(ctr, tree, entry_rel, call, f".flowdiff/run/harness{index}", timeout)
+            if isinstance(built_harness, str):
+                return f"{side}: {built_harness}"
+            executables = [built_harness[0]]
+        else:
+            exes = harness_cpp.test_executables(tree, test_files, ctr.workdir)
+            executables = [exes[f] for f in test_files if f in exes and f in head_exes]
+            if not executables:
+                return f"{side}: none of the covering test executables exist on this side"
+        failure = harness_cpp.trace_tests(ctr, tree, executables, gdb_frames, tests, local, timeout)
         if failure:
             return failure
         traces[side].write_text(local.read_text())
         return None
 
-    plan.note = f"driven by {len(head_exes)} covering test executable(s) under gdb"
+    if literal is not None:
+        plan.driver = harness_cpp.frame_id(root, flow.entry) if flow.entry is not None else None
+    else:
+        plan.note = f"driven by {len(head_exes)} covering test executable(s) under gdb"
     plan.drive = drive
 
-    def delta() -> list[str]:
-        before = harness_cpp.run_executables(ctr, base, list(head_exes.values()), timeout)
-        after = harness_cpp.run_executables(ctr, root, list(head_exes.values()), timeout)
-        return [f"  {exe}  {before.get(exe, 'ABSENT')}→{after[exe]}" for exe in head_exes.values()]
-
-    plan.delta = delta
-    device, variant = harness_cpp.linked_variant(ctr, root, list(head_exes.values()))
-    plan.trailer.append(variant)
-    if device:
-        plan.stop = f"{variant}; these frames need the device: {', '.join(sorted(f.name for f in flow.frames))}"
+    if head_exes:
+        def delta() -> list[str]:
+            before = harness_cpp.run_executables(ctr, base, list(head_exes.values()), timeout)
+            after = harness_cpp.run_executables(ctr, root, list(head_exes.values()), timeout)
+            return [f"  {exe}  {before.get(exe, 'ABSENT')}→{after[exe]}" for exe in head_exes.values()]
+        plan.delta = delta
+    if head_exes:
+        device, variant = harness_cpp.linked_variant(ctr, root, list(head_exes.values()))
+        plan.trailer.append(variant)
+        if device:
+            plan.stop = f"{variant}; these frames need the device: {', '.join(sorted(f.name for f in flow.frames))}"
     return plan
 
 
@@ -221,7 +235,7 @@ def run(args: argparse.Namespace) -> int:
             if client.config.language_id == "python":
                 plans[id(flow)] = python_plan(client, g, flow, root, base_holder[0], out_dir, index, args.run_timeout)
             elif analysis.container is not None:
-                plans[id(flow)] = cpp_plan(analysis.container, flow, root, base_holder[0], out_dir, index,
+                plans[id(flow)] = cpp_plan(analysis.container, client, flow, root, base_holder[0], out_dir, index,
                                            args.run_timeout, args.build_timeout)
             else:
                 analysis.warnings.append(f"{flow.language} flows outside a container are analysed only")
@@ -270,8 +284,9 @@ def run(args: argparse.Namespace) -> int:
             print(compare.show(report, frame))
         if plan.delta is not None:
             print("\n".join(plan.delta()))
+        names = {frame: node.qualified for frame, node in zip(plan.frames, [n for n in flow.frames if n.status != "slot"])}
         index.append({"flow": i, "frames": plan.frames, "base": str(traces["base"]), "head": str(traces["head"]),
-                      "driver": plan.driver})
+                      "driver": plan.driver, "names": names})
         if i < len(shown):
             print()
     removed = [f for f in analysis.flows if f.removed_only]

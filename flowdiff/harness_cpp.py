@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 from pathlib import Path
 
 from . import container, trace_gdb, worktree
@@ -58,15 +59,51 @@ def test_executables(tree: Path, test_files: list[str], workdir: str | None = No
     return found
 
 
+def harvest(client, root: Path, entry: Node) -> list[str] | None:
+    """Literal arguments from the entry's call sites, test files first (decision 18); None when none has them."""
+    from .lsp import Position
+    from .graph import is_test_path
+    refs = client.references(entry.path, Position(entry.line, entry.col))
+    sites = sorted(((loc.path, loc.range.start.line) for loc in refs),
+                   key=lambda s: (not is_test_path(s[0], root), str(s[0]), s[1]))
+    for path, line in sites:
+        args = literal_call(path.read_text(encoding="utf-8", errors="replace"), line, entry.name)
+        if args is not None:
+            return [a.strip() for a in args]
+    return None
+
+
 def literal_call(text: str, line: int, name: str) -> list[str] | None:
     """Arguments of the call to `name` on 0-based `line` when every one is a literal, else None."""
     short = name.rsplit("::", 1)[-1]
-    for candidate in text.splitlines()[line:line + 1]:
-        match = re.search(re.escape(short) + r"\s*\((.*)\)\s*;?", candidate)
-        if not match:
+    lines = text.splitlines()
+    if line >= len(lines):
+        return None
+    for match in re.finditer(r"(?<![\w])" + re.escape(short) + r"\s*\(", lines[line]):
+        inner = balanced(lines[line][match.end():])
+        if inner is None:
             return None
-        args = split_arguments(match.group(1))
-        return args if args is not None and all(LITERAL.match(a.strip()) for a in args) else None
+        args = split_arguments(inner)
+        if args is not None and all(LITERAL.match(a.strip()) for a in args):
+            return args
+    return None
+
+
+def balanced(text: str) -> str | None:
+    """The text up to the parenthesis closing an already-open one, or None when it never closes."""
+    depth, quote = 1, None
+    for i, ch in enumerate(text):
+        if quote:
+            if ch == quote and text[i - 1] != "\\":
+                quote = None
+        elif ch in "\"'":
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return text[:i]
     return None
 
 
@@ -134,6 +171,105 @@ def trace_tests(ctr: container.Container, tree: Path, executables: list[str], fr
         with out.open("a") as merged:
             merged.write(part.read_text())
     return None
+
+
+def compile_entry(tree: Path, source_rel: str, workdir: str | None) -> dict | None:
+    for entry in compile_db(tree):
+        try:
+            if source_of(tree, entry, workdir).relative_to(tree.resolve()).as_posix() == source_rel:
+                return entry
+        except ValueError:
+            continue
+    return None
+
+
+DROP_WITH_VALUE = {"-o", "-MQ", "-MF", "-MT"}
+DROP = {"-c", "-MD", "-MMD"}
+
+
+def borrowed_flags(entry: dict) -> list[str]:
+    """The TU's own compile command without its output, dependency and source arguments (decision 21)."""
+    words = shlex.split(entry["command"]) if "command" in entry else list(entry.get("arguments", []))
+    out: list[str] = []
+    skip = False
+    for word in words[1:]:
+        if skip:
+            skip = False
+            continue
+        if word in DROP_WITH_VALUE:
+            skip = True
+        elif word in DROP or word == entry["file"]:
+            continue
+        else:
+            out.append(word)
+    return out + ["-g", "-O0", "-fno-inline"]
+
+
+def harness_source(tu: str, call: str) -> str:
+    """The TU is included, not linked, so its statics are callable (decision 20)."""
+    return f'#include "{tu}"\n\nint main() {{\n    (void)({call});\n    return 0;\n}}\n'
+
+
+def target_of(entry: dict) -> tuple[str, str] | None:
+    """(objects directory, built artefact) for a meson entry: <target>.p/ holds the objects, <target> is the artefact."""
+    output = entry.get("output", "")
+    if ".p/" not in output:
+        return None
+    prefix = output.split(".p/", 1)[0]
+    return f"{prefix}.p", prefix
+
+
+def link_inputs(ctr: container.Container, tree: Path, entry: dict) -> tuple[list[str], list[str]] | None:
+    """Sibling objects of the entry's target (its own object excluded, the harness includes that TU) and the
+    linker flags for every library the built artefact NEEDs: internal ones by path, external ones by -l (22)."""
+    target = target_of(entry)
+    if target is None:
+        return None
+    objects_dir, artefact = target
+    build = tree / BUILD_DIR
+    own = Path(entry["output"]).name
+    siblings = sorted(f"{objects_dir}/{p.name}" for p in (build / objects_dir).glob("*.o") if p.name != own)
+    flags: list[str] = []
+    rpaths: list[str] = []
+    for lib in container.needed_libraries(ctr, tree, f"{ctr.workdir}/{BUILD_DIR}/{artefact}"):
+        internal = [p for p in build.rglob(lib) if p.is_file()]
+        if internal:
+            rel = internal[0].relative_to(build).as_posix()
+            flags.append(rel)
+            rpaths.append(f"-Wl,-rpath,{ctr.workdir}/{BUILD_DIR}/{Path(rel).parent.as_posix()}".rstrip("/."))
+        else:
+            name = re.sub(r"^lib|\.so(\.\d+)*$", "", lib)
+            flags.append(f"-l{name}")
+    return siblings, flags + sorted(set(rpaths))
+
+
+def build_harness(ctr: container.Container, tree: Path, source_rel: str, call: str, out_dir_rel: str,
+                  timeout: float) -> str | tuple[str, str]:
+    """Compile and link the harness inside the container from the build dir; the executable's
+    tree-relative path, or the error text."""
+    entry = compile_entry(tree, source_rel, ctr.workdir)
+    if entry is None:
+        return f"{source_rel}: not in the compile database"
+    inputs = link_inputs(ctr, tree, entry)
+    if inputs is None:
+        return f"{source_rel}: its compile entry names no meson target"
+    siblings, libs = inputs
+    harness_dir = tree / out_dir_rel
+    harness_dir.mkdir(parents=True, exist_ok=True)
+    (harness_dir / "harness.cpp").write_text(harness_source(f"{ctr.workdir}/{source_rel}", call))
+    build_cwd = f"{ctr.workdir}/{BUILD_DIR}"
+    harness = f"{ctr.workdir}/{out_dir_rel}/harness"
+    steps = [[shlex.split(entry["command"])[0] if "command" in entry else "c++", *borrowed_flags(entry),
+              "-o", f"{harness}.o", "-c", f"{harness}.cpp"],
+             ["c++", f"{harness}.o", *siblings, *libs, "-pthread", "-o", harness]]
+    for step in steps:
+        try:
+            proc = ctr.run(tree, step, timeout=timeout, cwd=build_cwd)
+        except Exception as exc:
+            return f"harness: {exc}"
+        if proc.returncode != 0:
+            return f"harness {'link' if step is steps[1] else 'compile'} failed:\n{(proc.stdout + proc.stderr).strip()[-3000:]}"
+    return (f"{out_dir_rel}/harness", "")
 
 
 def run_executables(ctr: container.Container, tree: Path, executables: list[str], timeout: float) -> dict[str, str]:

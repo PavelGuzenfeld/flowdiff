@@ -13,6 +13,7 @@ from typing import Any
 FUNCTION_KINDS = frozenset({6, 9, 12})
 # The above plus the container kinds a flow can enter: class, enum, struct.
 TRACKED_KINDS = FUNCTION_KINDS | frozenset({5, 10, 23})
+NAMESPACE_KIND = 3
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,8 @@ class Symbol:
     selection: Range
     path: Path
     nested: bool = False
+    # Enclosing named namespaces, outermost first; what a harness must prefix to call the symbol.
+    namespaces: tuple[str, ...] = ()
 
     @property
     def is_function(self) -> bool:
@@ -280,15 +283,17 @@ class LspClient:
             self._flatten(item, path.resolve(), symbols)
         return symbols
 
-    def _flatten(self, item: dict[str, Any], path: Path, out: list[Symbol], nested: bool = False) -> None:
+    def _flatten(self, item: dict[str, Any], path: Path, out: list[Symbol], nested: bool = False,
+                 namespaces: tuple[str, ...] = ()) -> None:
         if "location" in item:
             rng = Range.from_lsp(item["location"]["range"])
             out.append(Symbol(item["name"], item["kind"], "", rng, rng, path, nested))
             return
         out.append(Symbol(item["name"], item["kind"], item.get("detail") or "",
-                          Range.from_lsp(item["range"]), Range.from_lsp(item["selectionRange"]), path, nested))
+                          Range.from_lsp(item["range"]), Range.from_lsp(item["selectionRange"]), path, nested, namespaces))
+        inner = namespaces + ((item["name"],) if item["kind"] == NAMESPACE_KIND and "anonymous" not in item["name"] else ())
         for child in item.get("children") or []:
-            self._flatten(child, path, out, nested or item["kind"] in FUNCTION_KINDS)
+            self._flatten(child, path, out, nested or item["kind"] in FUNCTION_KINDS, inner)
 
     def prepare_call_hierarchy(self, path: Path, pos: Position) -> list[dict[str, Any]]:
         return self.request("textDocument/prepareCallHierarchy", {

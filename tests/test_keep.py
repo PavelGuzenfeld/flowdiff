@@ -132,11 +132,13 @@ def test_keep_writes_a_cpp_test_from_gdb_traces(repo: Path, capsys):
         {"seq": 1, "event": "enter", "frame": "gst/t.cpp:ns::scale", "args": {"v": 4}},
         {"seq": 2, "event": "exit", "frame": "gst/t.cpp:ns::scale", "return": {"type": "R", "fields": {"ok": True}}}]))
     (run / "index.json").write_text(json.dumps([{"flow": 1, "frames": ["gst/t.cpp:ns::scale"], "base": str(run / "b.jsonl"),
-                                                 "head": str(run / "h.jsonl"), "driver": None}]))
+                                                 "head": str(run / "h.jsonl"), "driver": None,
+                                                 "names": {"gst/t.cpp:ns::scale": "geo::ns::scale"}}]))
     assert cli.main(["keep", "scale", "--repo", str(repo)]) == 0
     assert capsys.readouterr().out == "tests/flow_scale.cpp: 1 case(s), harness dialect; add it to the build to run it\n"
     written = (repo / "tests" / "flow_scale.cpp").read_text()
     assert '#include "t.hpp"' in written and "ASSERT_EQ(result.ok, true);" in written
+    assert "auto result = geo::ns::scale(4);" in written
     (run / "h.jsonl").write_text(json.dumps({"seq": 1, "event": "enter", "frame": "gst/t.cpp:ns::scale",
                                              "args": {"v": {"type": "Buf", "fields": {}}}}) + "\n")
     assert cli.main(["keep", "scale", "--repo", str(repo)]) == 2

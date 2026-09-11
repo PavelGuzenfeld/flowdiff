@@ -179,9 +179,9 @@ def emit_cpp(source_include: str, name: str, found: list, dialect: str, include:
     return "\n".join(lines)
 
 
-def keep_cpp(root: Path, full: str, calls: list[compare.Call]) -> int:
+def keep_cpp(root: Path, full: str, calls: list[compare.Call], qualified: str | None = None) -> int:
     path, name = full.split(":", 1)
-    found = cpp_cases(name, calls)
+    found = cpp_cases(qualified or name, calls)
     if not found:
         print(f"{full}: no recorded call has scalar arguments and an assertable return; nothing to keep", file=sys.stderr)
         return cli.EXIT_NOTHING
@@ -218,7 +218,7 @@ def run(args: argparse.Namespace) -> int:
         for full in compare.resolve(report, frame):
             path, name = full.split(":", 1)   # C++ names carry ::, so split at the path's colon, not the last
             if Path(path).suffix in CPP_SUFFIXES:
-                return keep_cpp(root, full, report.head.get(full, []))
+                return keep_cpp(root, full, report.head.get(full, []), entry.get("names", {}).get(full))
             module = harness_py.module_name(root, root / path)
             found = cases(module, name, report.head.get(full, []))
             if not found:

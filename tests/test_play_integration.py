@@ -1,4 +1,5 @@
 """End-to-end play and show: real git worktree, real pyright, the project's own interpreter."""
+import json
 import os
 import shutil
 import subprocess
@@ -130,6 +131,8 @@ def test_play_drives_the_flow_from_a_caller_when_the_entry_has_no_literal_site(p
 def test_keep_after_play_writes_a_passing_pytest_file(played: Path, capsys):
     assert cli.main(["play", "--repo", str(played), "--no-tests"]) == 0
     capsys.readouterr()
+    index = json.loads((played / ".flowdiff" / "run" / "index.json").read_text())
+    assert index[0]["driver"] == "lib.py:scale" and index[0]["names"] == {"lib.py:scale": "scale", "lib.py:clamp": "clamp"}
     assert cli.main(["keep", "--repo", str(played)]) == 0
     assert "tests/flow_scale.py: 1 case(s), pytest dialect" in capsys.readouterr().out
     written = played / "tests" / "flow_scale.py"
