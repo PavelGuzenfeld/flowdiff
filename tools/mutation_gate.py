@@ -50,6 +50,10 @@ STATUS_CLASSES = ("killed", "timeout", "suspicious", "survived", "skipped", "unt
 # as killed. Reading junitxml instead reports those as errors, which understates the score.
 KILLING_CLASSES = ("killed", "timeout", "suspicious")
 
+# A protocol conversation with an external process, replaced by a fake in these modules' own tests:
+# the score measures the fake's fidelity, not the tests'. Reasoning and measured scores in #34.
+SCORE_EXEMPT = frozenset({"flowdiff/lsp.py", "flowdiff/container.py", "flowdiff/harness_cpp.py"})
+
 
 def status_counts(workdir: Path) -> dict[str, int]:
     counts = {}
@@ -68,6 +72,7 @@ class Result:
     def __init__(self, module: str, counts: dict[str, int], survivors: str,
                  seconds: float, log: str = ""):
         self.module = module
+        self.exempt = module in SCORE_EXEMPT
         self.counts = counts
         self.survivors = survivors
         self.seconds = seconds
@@ -90,12 +95,13 @@ class Result:
 
     def passed(self, threshold: float) -> bool:
         """No mutants means mutmut never ran; that is a broken gate, never a pass."""
-        return self.total > 0 and self.score() >= threshold
+        return self.total > 0 and (self.exempt or self.score() >= threshold)
 
     def line(self, threshold: float) -> str:
         if self.total == 0:
             return f"{self.module:<24} {'no mutants generated — mutmut failed':<30} {self.seconds:5.0f}s  ERROR"
-        verdict = "ok" if self.passed(threshold) else "BELOW THRESHOLD"
+        verdict = "exempt (#34)" if self.exempt else (
+            "ok" if self.score() >= threshold else "BELOW THRESHOLD")
         return (f"{self.module:<24} {self.killed:>4}/{self.total:<4} {self.score():6.1f}%  "
                 f"{self.seconds:5.0f}s  {verdict:<16} {self.detail()}")
 

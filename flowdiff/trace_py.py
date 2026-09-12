@@ -9,9 +9,15 @@ import inspect
 import json
 import os
 import sys
+from collections import Counter
 from typing import Any, Iterable, Optional
 
 from . import summarise
+
+
+# Rebinding a parameter moves the local without touching the caller's object, and two parameters
+# holding one object cannot be told apart by name, so neither can be pinned from an exit value.
+IMMUTABLE = (bool, int, float, complex, str, bytes, type(None))
 
 
 def frame_key(tree: str, filename: str, name: str) -> Optional[str]:
@@ -31,6 +37,7 @@ class Tracer:
         self.context: Optional[str] = None
         self._tool = None
         self._previous_trace: Any = None
+        self.watched: dict = {}
         summarise.load_project_summariser(self.tree, os.environ.get("FLOWDIFF_SCRATCH"))
 
     def key_of(self, code: Any) -> Optional[str]:
@@ -53,12 +60,34 @@ class Tracer:
         if info.keywords and info.keywords in info.locals:
             args["**" + info.keywords] = summarise.summarise(info.locals[info.keywords])
         self.record("enter", key, {"args": args})
+        self.watch(frame, info)
 
-    def on_return(self, key: str, value: Any) -> None:
-        self.record("exit", key, {"return": summarise.summarise(value)})
+    def watch(self, frame: Any, info: Any) -> None:
+        """The arguments a caller could see written into: mutable, and aliased by no other argument."""
+        ids = {n: id(info.locals[n]) for n in info.args
+               if n in info.locals and not isinstance(info.locals[n], IMMUTABLE)}
+        counts = Counter(ids.values())
+        self.watched[id(frame)] = {n: i for n, i in ids.items() if counts[i] == 1}
 
-    def on_raise(self, key: str, exc: BaseException) -> None:
-        self.record("exit", key, {"raises": type(exc).__name__})
+    def after(self, frame: Any) -> dict:
+        """The watched arguments summarised again, skipping any the body rebound rather than mutated."""
+        watched = self.watched.pop(id(frame), None)
+        if not watched:
+            return {}
+        values = inspect.getargvalues(frame).locals
+        out = {n: summarise.summarise(values[n]) for n, i in watched.items()
+               if n in values and id(values[n]) == i}
+        return {"after": out} if out else {}
+
+    def on_return(self, key: str, frame: Any, value: Any) -> None:
+        payload = self.after(frame)
+        payload["return"] = summarise.summarise(value)
+        self.record("exit", key, payload)
+
+    def on_raise(self, key: str, frame: Any, exc: BaseException) -> None:
+        payload = self.after(frame)
+        payload["raises"] = type(exc).__name__
+        self.record("exit", key, payload)
 
     def start(self) -> None:
         monitoring = getattr(sys, "monitoring", None)
@@ -81,6 +110,7 @@ class Tracer:
             self._tool = None
         else:
             sys.settrace(self._previous_trace)
+        self.watched.clear()
         self.out.close()
 
     def _py_start(self, code: Any, offset: int) -> Any:
@@ -93,13 +123,13 @@ class Tracer:
         key = self.key_of(code)
         if key is None:
             return sys.monitoring.DISABLE
-        self.on_return(key, value)
+        self.on_return(key, sys._getframe(1), value)
 
     def _py_unwind(self, code: Any, offset: int, exc: BaseException) -> None:
         # PY_UNWIND is not a local event: returning DISABLE here is a ValueError, unlike PY_START/PY_RETURN.
         key = self.key_of(code)
         if key is not None:
-            self.on_raise(key, exc)
+            self.on_raise(key, sys._getframe(1), exc)
 
     def _settrace(self, frame: Any, event: str, arg: Any) -> Any:
         if event != "call":
@@ -116,9 +146,9 @@ class Tracer:
             elif event == "return":
                 # A frame leaving by exception reports return None; the pending exception says so.
                 if arg is None and pending:
-                    self.on_raise(key, pending[0])
+                    self.on_raise(key, frame, pending[0])
                 else:
-                    self.on_return(key, arg)
+                    self.on_return(key, frame, arg)
             return local
         return local
 
