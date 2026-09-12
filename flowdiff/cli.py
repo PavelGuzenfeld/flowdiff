@@ -126,6 +126,9 @@ def analyse(args: argparse.Namespace, visit: Visitor | None = None) -> Analysis 
         if ".." in (args.ref or ""):
             root, revs = head_checkout(root, revs)
         hunks = changes.diff_hunks(revs)
+    except worktree.WorktreeError as err:
+        print(err, file=sys.stderr)
+        return EXIT_TOOL_ERROR
     except subprocess.CalledProcessError as err:
         detail = (err.stderr or "").splitlines()
         reason = next((line.removeprefix("fatal: ") for line in detail if line.startswith("fatal:")), "failed")
@@ -187,6 +190,9 @@ def analyse(args: argparse.Namespace, visit: Visitor | None = None) -> Analysis 
                 analysis.base_flows += base_side(analysis, config, changed, flows, args)
         except lsp.LspError as err:
             print(f"language server: {err}", file=sys.stderr)
+            return EXIT_TOOL_ERROR
+        except worktree.WorktreeError as err:
+            print(err, file=sys.stderr)
             return EXIT_TOOL_ERROR
         finally:
             client.close()

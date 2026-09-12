@@ -1,4 +1,7 @@
+import shutil
 from pathlib import Path
+
+import pytest
 
 from flowdiff import worktree
 
@@ -63,6 +66,72 @@ def test_head_means_the_main_repo_head_not_the_base_worktrees(repo: Path):
     assert git(repo / ".flowdiff" / "base", "rev-parse", "HEAD").strip() == first
     base = worktree.base_worktree(repo, "HEAD")
     assert git(base, "rev-parse", "HEAD").strip() == second
+
+
+def superproject(repo: Path, tmp_path: Path) -> Path:
+    """Adds a submodule at sub, pinned to v2 at HEAD~1 and v1 at HEAD; returns its origin."""
+    origin = tmp_path / "sub-origin"
+    origin.mkdir()
+    git(origin, "init", "-q", "-b", "main")
+    git(origin, "config", "user.email", "tests@example.invalid")
+    git(origin, "config", "user.name", "tests")
+    (origin / "f.txt").write_text("v1\n")
+    git(origin, "add", "f.txt")
+    git(origin, "commit", "-q", "-m", "v1")
+    (origin / "f.txt").write_text("v2\n")
+    git(origin, "commit", "-q", "-am", "v2")
+    git(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(origin), "sub")
+    git(repo, "commit", "-q", "-m", "sub at v2")
+    git(repo / "sub", "checkout", "-q", "HEAD~1")
+    git(repo, "commit", "-q", "-am", "sub at v1")
+    return origin
+
+
+def test_a_worktrees_submodule_holds_the_commit_that_revision_pinned(repo: Path, tmp_path_factory):
+    superproject(repo, tmp_path_factory.mktemp("origin"))
+    base = worktree.base_worktree(repo, "HEAD~1")
+    assert (base / "sub" / "f.txt").read_text() == "v2\n"
+
+
+def test_submodules_are_populated_without_reaching_their_configured_remote(repo: Path, tmp_path_factory):
+    origin = superproject(repo, tmp_path_factory.mktemp("origin"))
+    shutil.rmtree(origin)
+    base = worktree.base_worktree(repo, "HEAD~1")
+    assert (base / "sub" / "f.txt").read_text() == "v2\n"
+
+
+def test_populating_a_worktree_leaves_the_main_trees_submodule_where_it_was(repo: Path, tmp_path_factory):
+    superproject(repo, tmp_path_factory.mktemp("origin"))
+    worktree.base_worktree(repo, "HEAD~1")
+    assert (repo / "sub" / "f.txt").read_text() == "v1\n"
+    assert git(repo, "status", "--short") == ""
+
+
+def test_a_reused_base_worktree_moves_its_submodule_to_the_new_ref(repo: Path, tmp_path_factory):
+    superproject(repo, tmp_path_factory.mktemp("origin"))
+    worktree.base_worktree(repo, "HEAD~1")
+    base = worktree.base_worktree(repo, "HEAD")
+    assert (base / "sub" / "f.txt").read_text() == "v1\n"
+
+
+def test_a_repo_without_gitmodules_names_no_submodules(repo: Path):
+    assert worktree.submodule_names(repo) == []
+
+
+def test_gitmodules_names_every_submodule_of_the_revision(repo: Path, tmp_path_factory):
+    superproject(repo, tmp_path_factory.mktemp("origin"))
+    assert worktree.submodule_names(repo) == ["sub"]
+
+
+def test_an_unpopulatable_submodule_stops_the_run_with_gits_own_reason(repo: Path, tmp_path_factory):
+    origin = superproject(repo, tmp_path_factory.mktemp("origin"))
+    shutil.rmtree(repo / ".git" / "modules" / "sub")
+    shutil.rmtree(origin)
+    with pytest.raises(worktree.WorktreeError) as err:
+        worktree.base_worktree(repo, "HEAD")
+    message = str(err.value)
+    assert message.startswith(f"{repo / '.flowdiff' / 'base'}: submodule update failed\n")
+    assert "fatal: clone of" in message and str(origin) in message
 
 
 def test_clean_recreates_the_worktree(repo: Path):

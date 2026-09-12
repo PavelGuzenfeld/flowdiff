@@ -89,6 +89,14 @@ def test_only_test_file_changes_are_exit_2(tools_present, repo: Path, capsys):
     assert "no changed files in a supported language" in capsys.readouterr().out
 
 
+def test_a_worktree_that_cannot_be_populated_is_exit_1_with_the_reason(tools_present, monkeypatch, repo: Path, capsys):
+    def refuse(root: Path, ref: str) -> Path:
+        raise cli.worktree.WorktreeError("/w/base: submodule update failed: repository 'sub' does not exist")
+    monkeypatch.setattr(cli.worktree, "head_worktree", refuse)
+    assert cli.main(["--repo", str(repo), "HEAD~0..HEAD"]) == 1
+    assert "submodule update failed: repository 'sub' does not exist" in capsys.readouterr().err
+
+
 def test_unsupported_language_is_exit_2(tools_present, repo: Path, capsys):
     (repo / "notes.txt").write_text("hello\n")
     assert cli.main(["--repo", str(repo)]) == 2
