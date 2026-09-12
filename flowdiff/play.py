@@ -167,13 +167,21 @@ def cpp_plan(ctr: container.Container, client: lsp.LspClient, flow: graph.Flow, 
     entry_rel = harness_cpp.frame_id(root, flow.entry).split(":", 1)[0] if flow.entry is not None else ""
     call = f"{flow.entry.qualified}({', '.join(literal)})" if flow.entry is not None and literal is not None else ""
 
+    changed_sources = [n.path.resolve().relative_to(root.resolve()) for n in flow.changed]
+
     def ensure_built(tree: Path) -> str | None:
         if tree in built or no_build:
             return None
         print(f"building {tree.relative_to(root)} in {ctr.image}", file=sys.stderr)
         failure = container.build(ctr, tree, build_timeout)
         built.add(tree)
-        return failure
+        if failure is None:
+            return None
+        unusable = harness_cpp.unusable_after_build(tree, changed_sources, ctr.workdir)
+        if unusable is not None:
+            return f"{failure}\n{unusable}"
+        plan.warnings.append(f"{tree.name}: the build failed elsewhere; drove the flow from the artefacts it left")
+        return None
 
     def drive(side: str, tree: Path) -> str | None:
         failure = ensure_built(tree)

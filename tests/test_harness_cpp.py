@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -309,3 +310,55 @@ def test_run_executables_and_linked_variant(tmp_path: Path, monkeypatch):
     assert harness_cpp.run_executables(ctr, tmp_path, ["builddir/tests/hangs"], 5) == {"builddir/tests/hangs": "TIMEOUT"}
     assert harness_cpp.linked_variant(ctr, tmp_path, ["builddir/tests/ok"]) == ([], "linked: no device libraries (host build)")
     assert harness_cpp.linked_variant(ctr, tmp_path, ["builddir/tests/dev"]) == (["libnvbufsurface.so"], "linked: libnvbufsurface.so (device build)")
+
+
+def test_an_object_is_found_in_the_meson_output_field_and_the_cmake_directory(tmp_path: Path):
+    tree = cmake_tree(tmp_path)
+    entry = harness_cpp.compile_entry(tree, "pkg/src/util.cpp", "/ws")
+    assert entry is not None
+    assert harness_cpp.object_of(tree, entry, "/ws") == \
+        tree / "build" / "pkg" / "CMakeFiles" / "libutil.dir" / "src" / "util.cpp.o"
+    meson = {"directory": "/src/builddir", "file": "../gst/x.cpp", "output": "gst/libx.so.p/x.cpp.o"}
+    write_db(tmp_path, [meson])
+    assert harness_cpp.object_of(tmp_path, meson, "/src") is None
+    obj = tmp_path / "builddir" / "gst" / "libx.so.p" / "x.cpp.o"
+    obj.parent.mkdir(parents=True)
+    obj.write_text("")
+    assert harness_cpp.object_of(tmp_path, meson, "/src") == obj
+
+
+def built_cmake_tree(tmp_path: Path) -> Path:
+    """cmake_tree with the sources on disk, each older than the object built from it."""
+    tree = cmake_tree(tmp_path)
+    for rel in ("pkg/src/util.cpp", "pkg/test/util_test.cpp"):
+        (tree / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tree / rel).write_text("int f();\n")
+        os.utime(tree / rel, (1_000_000, 1_000_000))
+    for obj in (tree / "build").rglob("*.o"):
+        os.utime(obj, (2_000_000, 2_000_000))
+    return tree
+
+
+def test_a_build_that_failed_elsewhere_leaves_usable_artefacts(tmp_path: Path):
+    tree = built_cmake_tree(tmp_path)
+    assert harness_cpp.unusable_after_build(tree, [Path("pkg/src/util.cpp")], "/ws") is None
+
+
+def test_an_object_older_than_its_source_is_never_traced(tmp_path: Path):
+    tree = built_cmake_tree(tmp_path)
+    os.utime(tree / "pkg" / "src" / "util.cpp", (3_000_000, 3_000_000))
+    assert harness_cpp.unusable_after_build(tree, [Path("pkg/src/util.cpp")], "/ws") == \
+        "build/pkg/CMakeFiles/libutil.dir/src/util.cpp.o is older than pkg/src/util.cpp"
+
+
+def test_a_changed_source_with_no_object_or_no_entry_stops_the_run(tmp_path: Path):
+    tree = built_cmake_tree(tmp_path)
+    (tree / "build" / "pkg" / "CMakeFiles" / "libutil.dir" / "src" / "util.cpp.o").unlink()
+    assert harness_cpp.unusable_after_build(tree, [Path("pkg/src/util.cpp")], "/ws") == \
+        "pkg/src/util.cpp has no object in the build tree"
+    assert harness_cpp.unusable_after_build(tree, [Path("pkg/src/new.cpp")], "/ws") == \
+        "pkg/src/new.cpp is not in the compile database"
+
+
+def test_a_build_that_wrote_no_compile_database_stops_the_run(tmp_path: Path):
+    assert harness_cpp.unusable_after_build(tmp_path, [Path("a.cpp")], "/ws") == "no compile database was written"
