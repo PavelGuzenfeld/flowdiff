@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from flowdiff import cli, compare, keep
+from flowdiff import cli, compare, keep, worktree
 
 
 def test_dialect_detection_prefers_pytest_then_unittest_then_plain(tmp_path: Path):
@@ -190,6 +190,16 @@ def test_keep_error_paths(repo: Path, capsys, tmp_path: Path):
     assert cli.main(["keep", "f", "--repo", str(repo)]) == 2
     assert "no recorded call has literal arguments" in capsys.readouterr().err
     assert cli.main(["keep", "--repo", str(tmp_path / "nowhere")]) == 1
+
+
+def test_keep_reads_a_ranges_recordings_and_writes_the_test_in_the_repo(repo: Path, capsys):
+    head = worktree.head_worktree(repo, "HEAD")
+    recorded(head, "a.py:g")
+    worktree.remember_run(repo, head)
+    assert cli.main(["keep", "--repo", str(repo)]) == 0
+    assert capsys.readouterr().out.startswith("tests/flow_g.py: 1 case(s)")
+    assert (repo / "tests" / "flow_g.py").is_file()
+    assert not (head / "tests").exists()
 
 
 def mutating(args: dict, after: dict, result=0) -> compare.Call:

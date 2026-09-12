@@ -300,6 +300,7 @@ def run(args: argparse.Namespace) -> int:
     if removed:
         print("\n" + render.render_removed(removed))
     (out_dir / "index.json").write_text(json.dumps(index))
+    worktree.remember_run(analysis.origin or root, root)
     sys.stdout.flush()
     for w in analysis.warnings:
         print(f"warning: {w}", file=sys.stderr)
@@ -307,10 +308,10 @@ def run(args: argparse.Namespace) -> int:
 
 
 def show(args: argparse.Namespace) -> int:
-    root = cli.repo_root(args.repo)
-    if root is None:
-        return cli.EXIT_TOOL_ERROR
-    index_path = root / worktree.SCRATCH / RUN_DIR / "index.json"
+    located = cli.last_run(args.repo)
+    if isinstance(located, int):
+        return located
+    index_path = located[1] / worktree.SCRATCH / RUN_DIR / "index.json"
     if not index_path.exists():
         print("nothing recorded; run flowdiff play first", file=sys.stderr)
         return cli.EXIT_NOTHING

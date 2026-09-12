@@ -262,10 +262,11 @@ def keep_cpp(root: Path, full: str, calls: list[compare.Call], qualified: str | 
 
 
 def run(args: argparse.Namespace) -> int:
-    root = cli.repo_root(args.repo)
-    if root is None:
-        return cli.EXIT_TOOL_ERROR
-    index_path = root / worktree.SCRATCH / RUN_DIR / "index.json"
+    located = cli.last_run(args.repo)
+    if isinstance(located, int):
+        return located
+    # The recordings come from the tree the range was played in; the test it writes belongs in the repo.
+    root, index_path = located[0], located[1] / worktree.SCRATCH / RUN_DIR / "index.json"
     if not index_path.exists():
         print("nothing recorded; run flowdiff play first", file=sys.stderr)
         return cli.EXIT_NOTHING
