@@ -222,6 +222,43 @@ def test_link_inputs_take_sibling_objects_and_resolve_needed_libraries(tmp_path:
     assert harness_cpp.link_inputs(container.Container("img", "/src"), tmp_path, ENTRY) == (siblings, [])
 
 
+def test_harness_plan_names_sibling_objects_but_never_runs_readelf_for_external_libs(tmp_path: Path, monkeypatch):
+    build = tmp_path / "builddir"
+    objects = build / "gst" / "common" / "libnvmm_common.so.p"
+    objects.mkdir(parents=True)
+    for name in ("t.cpp.o", "a.cpp.o"):
+        (objects / name).write_text("")
+    (build / "gst" / "common" / "libnvmm_common.so").write_text("")
+    write_db(tmp_path, [ENTRY])
+
+    def unexpected_run(cmd, **kw):
+        raise AssertionError(f"harness_plan must not execute anything, got {cmd}")
+    monkeypatch.setattr(harness_cpp.container.subprocess, "run", unexpected_run)
+    ctr = container.Container("img", "/src")
+    source, steps = harness_cpp.harness_plan(ctr, tmp_path, "gst/common/t.cpp", "nvmm::f(4)", ".flowdiff/run/harness1")
+    assert source.startswith('#include "/src/gst/common/t.cpp"') and "nvmm::f(4)" in source
+    assert steps[0][0] == "c++"
+    assert steps[0][-5:] == ["-fno-inline", "-o", "/src/.flowdiff/run/harness1/harness.o", "-c",
+                            "/src/.flowdiff/run/harness1/harness.cpp"]
+    assert steps[1] == ["c++", "/src/.flowdiff/run/harness1/harness.o",
+                        "/src/builddir/gst/common/libnvmm_common.so.p/a.cpp.o", "-pthread",
+                        "-o", "/src/.flowdiff/run/harness1/harness"]
+    assert harness_cpp.harness_plan(ctr, tmp_path, "gst/common/other.cpp", "f()", ".flowdiff/run/h") is None
+
+
+def test_harness_plan_takes_the_compiler_from_arguments_and_defaults_to_cxx(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(harness_cpp.container.subprocess, "run",
+                        lambda cmd, **kw: (_ for _ in ()).throw(AssertionError("must not execute")))
+    ctr = container.Container("img", "/src")
+    entry = {"directory": "/src/builddir", "file": "../gst/t.cpp", "output": "gst/libx.so.p/t.cpp.o"}
+    write_db(tmp_path, [{**entry, "arguments": ["clang++", "-std=c++20", "-c", "../gst/t.cpp", "-o", "gst/libx.so.p/t.cpp.o"]}])
+    _, steps = harness_cpp.harness_plan(ctr, tmp_path, "gst/t.cpp", "f()", ".flowdiff/run/h")
+    assert steps[0][0] == "clang++"
+    write_db(tmp_path, [entry])
+    _, steps = harness_cpp.harness_plan(ctr, tmp_path, "gst/t.cpp", "f()", ".flowdiff/run/h")
+    assert steps[0][0] == "c++"
+
+
 def test_build_harness_compiles_then_links_from_the_build_dir(tmp_path: Path, monkeypatch):
     build = tmp_path / "builddir"
     (build / "gst" / "common" / "libnvmm_common.so.p").mkdir(parents=True)
