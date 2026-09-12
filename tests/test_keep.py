@@ -54,14 +54,16 @@ def test_cases_keep_distinct_literal_calls_and_fall_back_to_summaries_for_return
              compare.Call(5, {"v": 5}, {"type": "P", "fields": {"a": 1}}, end=6),
              compare.Call(7, {"v": {"type": "Obj", "fields": {}}}, 1, end=8),
              compare.Call(9, {"v": 6}, raises="ValueError", end=10), compare.Call(11, {"v": 7})]
-    assert keep.cases("lib", "scale", calls) == [
-        ("lib.scale(4)", "8", True), ("lib.scale(5)", '{"type": "P", "fields": {"a": 1}}', False)]
+    assert keep.cases("lib", "scale", calls) == ([
+        keep.Case("lib.scale(4)", (), (("lib.scale(4)", "8", True),)),
+        keep.Case("lib.scale(5)", (), (("lib.scale(5)", '{"type": "P", "fields": {"a": 1}}', False),))], [])
     many = [compare.Call(i, {"v": i}, i, end=i) for i in range(20)]
-    assert len(keep.cases("lib", "f", many)) == keep.MAX_CASES == 12
+    assert len(keep.cases("lib", "f", many)[0]) == keep.MAX_CASES == 12
 
 
 def test_emit_pytest_dialect():
-    found = [("lib.scale(4)", "8", True), ("lib.scale(5)", '{"type": "P"}', False)]
+    found = [keep.Case("lib.scale(4)", (), (("lib.scale(4)", "8", True),)),
+             keep.Case("lib.scale(5)", (), (("lib.scale(5)", '{"type": "P"}', False),))]
     assert keep.emit("lib", "scale", found, "pytest") == (
         '"""Golden flow test written by flowdiff keep; rerun keep after a deliberate behaviour change."""\n'
         "import lib\nfrom flowdiff.summarise import summarise\n\n\n"
@@ -70,7 +72,7 @@ def test_emit_pytest_dialect():
 
 
 def test_emit_unittest_and_plain_dialects():
-    found = [("lib.scale(4)", "8", True)]
+    found = [keep.Case("lib.scale(4)", (), (("lib.scale(4)", "8", True),))]
     assert keep.emit("lib", "scale", found, "unittest") == (
         keep.HEADER + "import unittest\nimport lib\n\n\n"
         "class FlowScale(unittest.TestCase):\n    def test_1(self):\n        self.assertEqual(lib.scale(4), 8)\n")
@@ -102,12 +104,14 @@ def test_cpp_literals_and_cases():
              compare.Call(7, {"x": {"type": "Obj", "fields": {}}}, 1, end=8),
              compare.Call(9, {"x": 1}, {"type": "Opaque"}, end=10),
              compare.Call(11, {"x": 1}, raises="unwound", end=12)]
-    assert keep.cpp_cases("ns::f", calls) == [
-        ("ns::f(4, true)", [(".ok", "true"), (".code", "0")]), ("ns::f(7)", [("", "9")])]
+    assert keep.cpp_cases("ns::f", calls) == ([
+        keep.Case("ns::f(4, true)", (), (("result.ok", "true", True), ("result.code", "0", True))),
+        keep.Case("ns::f(7)", (), (("result", "9", True),))], [])
 
 
 def test_emit_cpp_in_the_local_harness_dialect_and_plain():
-    found = [("ns::f(4, true)", [(".ok", "true"), (".code", "0")]), ("ns::f(7)", [("", "9")])]
+    found = [keep.Case("ns::f(4, true)", (), (("result.ok", "true", True), ("result.code", "0", True))),
+             keep.Case("ns::f(7)", (), (("result", "9", True),))]
     text = keep.emit_cpp("f.hpp", "ns::f", found, "harness", '#include "test_harness.h"')
     assert text.splitlines()[:3] == ["// Golden flow test written by flowdiff keep; rerun keep after a deliberate behaviour change.",
                                      '#include "f.hpp"', '#include "test_harness.h"']
@@ -186,3 +190,74 @@ def test_keep_error_paths(repo: Path, capsys, tmp_path: Path):
     assert cli.main(["keep", "f", "--repo", str(repo)]) == 2
     assert "no recorded call has literal arguments" in capsys.readouterr().err
     assert cli.main(["keep", "--repo", str(tmp_path / "nowhere")]) == 1
+
+
+def mutating(args: dict, after: dict, result=0) -> compare.Call:
+    return compare.Call(1, args, result, end=2, after=after)
+
+
+def test_a_mutated_argument_is_bound_to_a_name_and_asserted_after_the_call():
+    call = mutating({"items": [1, 2], "n": 3}, {"items": [1, 2, 3]}, result=3)
+    found, unpinned = keep.cases("lib", "fill", [call])
+    assert unpinned == []
+    assert found == [keep.Case("lib.fill(items, 3)", (("items", "[1, 2]"),),
+                               (("result", "3", True), ("items", "[1, 2, 3]", True)))]
+    assert keep.emit("lib", "fill", found, "pytest") == (
+        keep.HEADER + "import lib\n\n\n"
+        "def test_flow_fill_1():\n    items = [1, 2]\n    result = lib.fill(items, 3)\n"
+        "    assert result == 3\n    assert items == [1, 2, 3]\n")
+
+
+def test_an_argument_the_body_left_alone_is_not_bound():
+    call = mutating({"items": [1, 2]}, {"items": [1, 2]}, result=2)
+    found, unpinned = keep.cases("lib", "size", [call])
+    assert found == [keep.Case("lib.size([1, 2])", (), (("lib.size([1, 2])", "2", True),))] and unpinned == []
+
+
+def test_a_mutated_argument_no_literal_can_stand_in_for_is_named_instead():
+    call = mutating({"sink": {"type": "Writer", "fields": {}}, "n": 1},
+                    {"sink": {"type": "Writer", "fields": {"count": 1}}})
+    found, unpinned = keep.cases("lib", "emit", [call])
+    assert found == [] and unpinned == ["sink"]
+    assert keep.unpinned_note(unpinned) == "; mutated but not asserted: sink"
+    assert keep.unpinned_note([]) == ""
+
+
+def test_a_mutated_argument_whose_name_the_test_cannot_introduce_is_not_bound():
+    for arg in ("lib", "result", "class", "*rest"):
+        call = mutating({arg: [1]}, {arg: [1, 2]})
+        found, unpinned = keep.cases("lib", "fill", [call])
+        assert unpinned == [arg.lstrip("*")], arg
+    assert keep.bindable("lib", "items") and not keep.bindable("pkg.lib", "pkg")
+
+
+def test_bound_cases_in_the_unittest_and_plain_dialects():
+    found = [keep.Case("lib.fill(items, 3)", (("items", "[1, 2]"),),
+                       (("result", "3", True), ("items", "[1, 2, 3]", True)))]
+    assert keep.emit("lib", "fill", found, "unittest") == (
+        keep.HEADER + "import unittest\nimport lib\n\n\n"
+        "class FlowFill(unittest.TestCase):\n    def test_1(self):\n        items = [1, 2]\n"
+        "        result = lib.fill(items, 3)\n        self.assertEqual(result, 3)\n"
+        "        self.assertEqual(items, [1, 2, 3])\n")
+    assert keep.emit("lib", "fill", found, "plain") == (
+        keep.HEADER + "import lib\n\n\nitems = [1, 2]\nresult = lib.fill(items, 3)\n"
+        "assert result == 3\nassert items == [1, 2, 3]\n")
+    for dialect in ("pytest", "unittest", "plain"):
+        assert compile(keep.emit("lib", "fill", found, dialect), "t", "exec")
+
+
+def test_a_mutated_scalar_reference_is_bound_and_asserted_in_cpp():
+    call = compare.Call(1, {"v": 4, "n": 2}, 8, end=2, after={"v": 7})
+    found, unpinned = keep.cpp_cases("ns::scale", [call])
+    assert unpinned == []
+    assert found == [keep.Case("ns::scale(v, 2)", (("v", "4"),), (("result", "8", True), ("v", "7", True)))]
+    text = keep.emit_cpp("f.hpp", "ns::scale", found, "harness", '#include "test_harness.h"')
+    assert ("TEST(flow_scale_1) {\n    auto v = 4;\n    auto result = ns::scale(v, 2);\n"
+            "    ASSERT_EQ(result, 8);\n    ASSERT_EQ(v, 7);\n}") in text
+
+
+def test_a_mutated_cpp_argument_that_is_not_scalar_is_named_instead():
+    call = compare.Call(1, {"out": {"type": "R", "fields": {"ok": False}}}, 0, end=2,
+                        after={"out": {"type": "R", "fields": {"ok": True}}})
+    found, unpinned = keep.cpp_cases("ns::fill", [call])
+    assert found == [] and unpinned == ["out"]
