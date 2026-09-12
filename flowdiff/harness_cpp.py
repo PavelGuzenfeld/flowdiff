@@ -291,6 +291,31 @@ def harness_source(tu: str, call: str) -> str:
     return f'#include "{tu}"\n\nint main() {{\n    (void)({call});\n    return 0;\n}}\n'
 
 
+MAIN_RULE = ("id: tu_main\nlanguage: cpp\nrule:\n  kind: function_definition\n  inside:\n"
+             "    kind: translation_unit\n  has:\n    kind: function_declarator\n"
+             "    has:\n      field: declarator\n      regex: ^main$\n")
+
+
+def defines_main(path: Path) -> bool:
+    """The harness defines main too, so including such a TU is a duplicate symbol the linker reports late."""
+    from .changes import scan_rule
+    if not path.is_file():
+        return False
+    return bool(scan_rule(MAIN_RULE, path.suffix, path.read_text(encoding="utf-8", errors="replace")))
+
+
+DUPLICATE = re.compile(r"multiple definition of [`'\"](.+?)['\"]")
+
+
+def link_failure(source_rel: str, output: str) -> str:
+    match = DUPLICATE.search(output)
+    if match is None:
+        return f"harness link failed:\n{output}"
+    return (f"harness link failed: {source_rel} is included by the harness, not linked, and it defines "
+            f"{match.group(1)}, which an object the harness links defines too; a covering test executable "
+            f"is the way into this entry\n{output}")
+
+
 def link_inputs(ctr: container.Container, tree: Path, entry: dict) -> tuple[list[str], list[str]] | None:
     """Sibling objects of the entry's target (its own object excluded, the harness includes that TU) and the
     linker flags for every library the built artefact NEEDs: internal ones by path, external ones by -l (22).
@@ -341,7 +366,8 @@ def build_harness(ctr: container.Container, tree: Path, source_rel: str, call: s
         except Exception as exc:
             return f"harness: {exc}"
         if proc.returncode != 0:
-            return f"harness {'link' if step is steps[1] else 'compile'} failed:\n{(proc.stdout + proc.stderr).strip()[-3000:]}"
+            output = (proc.stdout + proc.stderr).strip()[-3000:]
+            return link_failure(source_rel, output) if step is steps[1] else f"harness compile failed:\n{output}"
     return (f"{out_dir_rel}/harness", "")
 
 

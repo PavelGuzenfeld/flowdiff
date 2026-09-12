@@ -369,3 +369,32 @@ def test_a_deleted_translation_unit_is_not_read_for_a_timestamp(tmp_path: Path):
     tree = built_cmake_tree(tmp_path)
     (tree / "pkg" / "src" / "util.cpp").unlink()
     assert harness_cpp.unusable_after_build(tree, [Path("pkg/src/util.cpp")], "/ws") is None
+
+
+def test_only_a_top_level_main_definition_collides_with_the_harness(tmp_path: Path):
+    def tu(text: str) -> Path:
+        path = tmp_path / "tu.cpp"
+        path.write_text(text)
+        return path
+    assert harness_cpp.defines_main(tu("int main() { return 0; }\n"))
+    assert harness_cpp.defines_main(tu("int main(int argc, char** argv) { return argc; }\n"))
+    assert harness_cpp.defines_main(tu("int main(void) { return 0; }\n"))
+    assert not harness_cpp.defines_main(tu("int mainline() { return 0; }\nstruct S { int main_thing; };\n"))
+    assert not harness_cpp.defines_main(tu("struct App { int main() { return 0; } };\n"))
+    assert not harness_cpp.defines_main(tu("namespace detail { int main(int) { return 1; } }\n"))
+    assert not harness_cpp.defines_main(tu("int main();\n"))
+    assert not harness_cpp.defines_main(tmp_path / "gone.cpp")
+
+
+def test_a_duplicate_definition_at_link_says_which_name_the_included_unit_defines_twice():
+    raw = "/usr/bin/ld: sib.o: in function `ns::seed()':\nsib.cpp:3: multiple definition of `ns::seed()'; here"
+    message = harness_cpp.link_failure("gst/lib.cpp", raw)
+    assert message.startswith("harness link failed: gst/lib.cpp is included by the harness, not linked, "
+                              "and it defines ns::seed(), which an object the harness links defines too; "
+                              "a covering test executable is the way into this entry\n")
+    assert message.endswith(raw)
+
+
+def test_a_link_failure_with_no_duplicate_keeps_the_raw_output():
+    raw = "/usr/bin/ld: cannot find -lfoo: No such file or directory"
+    assert harness_cpp.link_failure("gst/lib.cpp", raw) == f"harness link failed:\n{raw}"

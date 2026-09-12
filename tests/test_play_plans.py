@@ -250,3 +250,45 @@ def test_run_routes_cpp_flows_to_cpp_plan_when_a_container_exists(repo: Path, mo
     assert play.run(args_for(repo, "--run-timeout", "7", "--build-timeout", "8")) == 0
     assert seen["args"] == (ctr, repo, repo / ".flowdiff" / "base", 1, 7.0, 8.0)
     assert "1 of 1 frames differ: scale (return); origin scale" in capsys.readouterr().out
+
+
+MAIN_TU = "namespace { int seed = 1; }\nint scale(int v, bool b) { return b ? v * seed : v; }\nint main() { return 0; }\n"
+
+
+def test_an_entry_whose_translation_unit_defines_main_is_driven_by_its_test_executables(tmp_path: Path, monkeypatch):
+    flow, nodes = flow_of(tmp_path, tests=("tests/test_lib.cpp::test_scale",), language="cpp")
+    (tmp_path / "lib.cpp").write_text(MAIN_TU)
+    fake = FakeCpp(monkeypatch, literal=["4", "true"])
+    out = tmp_path / "run"
+    out.mkdir()
+    plan = play.cpp_plan(container.Container("img", "/src"), FakeClient(tmp_path, {}, {}), flow, tmp_path,
+                         tmp_path / ".flowdiff" / "base", out, 1, 9.0, 99.0)
+    assert plan.stop is None and plan.driver is None
+    assert plan.note == "driven by 1 covering test executable(s) under gdb"
+    assert plan.warnings == ["lib.cpp defines main; driven by its test executables instead of a literal harness"]
+    assert plan.drive("head", tmp_path) is None
+    assert [c for c in fake.calls if c[0] == "harness"] == []
+
+
+def test_an_entry_with_main_and_no_test_executable_names_the_file_and_the_way_in(tmp_path: Path, monkeypatch):
+    flow, nodes = flow_of(tmp_path, tests=(), language="cpp")
+    (tmp_path / "lib.cpp").write_text(MAIN_TU)
+    FakeCpp(monkeypatch, exes={}, literal=["4", "true"])
+    out = tmp_path / "run"
+    out.mkdir()
+    plan = play.cpp_plan(container.Container("img", "/src"), FakeClient(tmp_path, {}, {}), flow, tmp_path,
+                         tmp_path / ".flowdiff" / "base", out, 1, 9.0, 99.0)
+    assert plan.stop == ("lib.cpp defines main, so the literal harness cannot include it, and no built test "
+                         "executable reaches this flow; a covering test is the way into this entry")
+    assert plan.drive is None
+
+
+def test_a_translation_unit_without_main_still_gets_the_literal_harness(tmp_path: Path, monkeypatch):
+    flow, nodes = flow_of(tmp_path, tests=("tests/test_lib.cpp::test_scale",), language="cpp")
+    (tmp_path / "lib.cpp").write_text(MAIN_TU.replace("int main() { return 0; }", "int mainline() { return 0; }"))
+    fake = FakeCpp(monkeypatch, literal=["4", "true"])
+    out = tmp_path / "run"
+    out.mkdir()
+    plan = play.cpp_plan(container.Container("img", "/src"), FakeClient(tmp_path, {}, {}), flow, tmp_path,
+                         tmp_path / ".flowdiff" / "base", out, 1, 9.0, 99.0)
+    assert plan.driver == "lib.cpp:scale" and plan.warnings == []
