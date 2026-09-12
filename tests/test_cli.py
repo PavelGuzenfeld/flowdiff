@@ -318,3 +318,11 @@ def test_parser_accepts_a_base_ref_and_overrides():
     args = cli.build_parser().parse_args(["origin/main", "--hops", "5", "--full", "--no-tests"])
     assert (args.ref, args.hops) == ("origin/main", 5)
     assert args.no_tests is True and args.full is True
+
+
+def test_a_range_analysis_remembers_the_repo_it_was_invoked_in(tools_present, repo: Path):
+    (repo / "a.py").write_text(SOURCE.replace("x + 1", "x + 2"))
+    git(repo, "commit", "-q", "-am", "change")
+    analysis = cli.analyse(cli.build_parser().parse_args(["--repo", str(repo), "--no-tests", "HEAD~1..HEAD"]))
+    assert isinstance(analysis, cli.Analysis)
+    assert analysis.origin == repo and analysis.root == repo / ".flowdiff" / "head" / repo.name
