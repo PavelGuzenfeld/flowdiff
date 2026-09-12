@@ -224,6 +224,29 @@ def test_workspace_symbols_keep_only_located_items(client: LspClient, tmp_path: 
     assert found[0].path == (tmp_path / "m.py").resolve()
 
 
+def test_references_opens_a_file_the_server_has_not_been_given(client: LspClient, tmp_path: Path):
+    """clangd refuses references on a document it does not hold: trying to get AST for non-added document."""
+    path = tmp_path / "unseen.py"
+    path.write_text("x = 1\n")
+    client.references(path, Position(0, 4))
+    assert settled_state(client)["open"] == {"uri": path.resolve().as_uri(), "languageId": "python",
+                                             "version": 1, "text": "x = 1\n"}
+
+
+def test_references_leaves_an_open_documents_text_alone(client: LspClient, tmp_path: Path):
+    path = tmp_path / "m.py"
+    path.write_text("on disk\n")
+    client.open(path, "edited in memory\n")
+    client.references(path, Position(0, 1))
+    assert settled_state(client)["open"]["text"] == "edited in memory\n"
+
+
+def test_references_on_a_path_that_is_gone_still_asks_the_server(client: LspClient, tmp_path: Path):
+    client.open(tmp_path / "m.py", "kept\n")
+    assert client.references(tmp_path / "deleted.py", Position(0, 0)) != []
+    assert settled_state(client)["open"]["text"] == "kept\n"
+
+
 def test_references_and_definition_locations(client: LspClient, tmp_path: Path):
     path = tmp_path / "m.py"
     client.open(path, "")
