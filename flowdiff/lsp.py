@@ -318,6 +318,9 @@ class LspClient:
                        path_of(item["location"]["uri"])) for item in result if "location" in item]
 
     def references(self, path: Path, pos: Position) -> list[Location]:
+        # clangd answers only for documents it holds; open() on one it has would resend the whole text.
+        if path.resolve() not in self._versions and path.is_file():
+            self.open(path, path.read_text(encoding="utf-8", errors="replace"))
         result = self.request("textDocument/references", {
             "textDocument": {"uri": uri_of(path)}, "position": pos.to_lsp(),
             "context": {"includeDeclaration": False}}) or []
