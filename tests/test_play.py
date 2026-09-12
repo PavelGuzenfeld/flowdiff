@@ -3,7 +3,9 @@ import os
 import stat
 from pathlib import Path
 
-from flowdiff import cli, compare, play
+from flowdiff import cli, compare, play, worktree
+
+from conftest import git
 
 FAKE_INTERPRETER = """\
 #!/usr/bin/env python3
@@ -172,3 +174,21 @@ def test_run_dir_lives_under_the_ignored_scratch_dir(repo: Path):
     assert play.run_dir(repo) == repo / ".flowdiff" / "run"
     assert (repo / ".flowdiff" / ".gitignore").read_text() == "*\n"
     assert os.path.isdir(repo / ".flowdiff" / "run")
+
+
+def test_show_reads_a_range_runs_recordings_without_a_hand_written_repo(repo: Path, capsys):
+    head = worktree.head_worktree(repo, "HEAD")
+    recorded(head)
+    worktree.remember_run(repo, head)
+    assert cli.main(["show", "f", "--repo", str(repo)]) == 0
+    assert capsys.readouterr().out.startswith("lib.py:f  base 1 call(s), head 1 call(s)")
+
+
+def test_show_reports_a_pruned_head_worktree_rather_than_reading_an_older_run(repo: Path, capsys):
+    recorded(repo)
+    head = worktree.head_worktree(repo, "HEAD")
+    worktree.scratch_dir(head)
+    worktree.remember_run(repo, head)
+    git(repo, "worktree", "remove", "--force", str(head))
+    assert cli.main(["show", "f", "--repo", str(repo)]) == 2
+    assert "the worktree holding the last play is gone" in capsys.readouterr().err

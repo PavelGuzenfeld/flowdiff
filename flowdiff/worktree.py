@@ -7,6 +7,7 @@ from pathlib import Path
 from .changes import git
 
 SCRATCH = ".flowdiff"
+POINTER = "last-run"
 
 
 class WorktreeError(RuntimeError):
@@ -20,6 +21,25 @@ def scratch_dir(root: Path) -> Path:
     if not ignore.exists():
         ignore.write_text("*\n")
     return scratch
+
+
+def remember_run(repo: Path, tree: Path) -> None:
+    """An A..B range records in its head worktree, which show and keep have no way to name."""
+    pointer = scratch_dir(repo) / POINTER
+    if tree == repo:
+        pointer.unlink(missing_ok=True)
+    else:
+        pointer.write_text(f"{tree}\n")
+
+
+def last_run_tree(repo: Path) -> Path:
+    pointer = repo / SCRATCH / POINTER
+    if not pointer.exists():
+        return repo
+    tree = Path(pointer.read_text().strip())
+    if not (tree / SCRATCH).is_dir():
+        raise WorktreeError(f"{tree}: the worktree holding the last play is gone; run flowdiff play again")
+    return tree
 
 
 def head_worktree(root: Path, ref: str) -> Path:

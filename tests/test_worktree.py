@@ -140,3 +140,34 @@ def test_clean_recreates_the_worktree(repo: Path):
     assert worktree.base_worktree(repo, "HEAD") == base and (base / "stale.txt").exists()
     worktree.base_worktree(repo, "HEAD", clean=True)
     assert not (base / "stale.txt").exists() and (base / "a.py").exists()
+
+
+def test_last_run_tree_is_the_repo_when_play_recorded_there(repo: Path):
+    worktree.remember_run(repo, repo)
+    assert worktree.last_run_tree(repo) == repo
+
+
+def test_last_run_tree_follows_the_pointer_a_range_left(repo: Path):
+    head = worktree.head_worktree(repo, "HEAD")
+    worktree.scratch_dir(head)
+    worktree.remember_run(repo, head)
+    assert worktree.last_run_tree(repo) == head
+
+
+def test_a_working_tree_run_clears_a_previous_ranges_pointer(repo: Path):
+    head = worktree.head_worktree(repo, "HEAD")
+    worktree.scratch_dir(head)
+    worktree.remember_run(repo, head)
+    worktree.remember_run(repo, repo)
+    assert not (repo / ".flowdiff" / "last-run").exists()
+    assert worktree.last_run_tree(repo) == repo
+
+
+def test_a_pruned_head_worktree_is_reported_not_silently_replaced_by_an_older_run(repo: Path):
+    head = worktree.head_worktree(repo, "HEAD")
+    worktree.scratch_dir(head)
+    worktree.remember_run(repo, head)
+    git(repo, "worktree", "remove", "--force", str(head))
+    with pytest.raises(worktree.WorktreeError) as err:
+        worktree.last_run_tree(repo)
+    assert str(err.value) == f"{head}: the worktree holding the last play is gone; run flowdiff play again"

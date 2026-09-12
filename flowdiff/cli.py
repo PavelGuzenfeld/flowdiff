@@ -30,6 +30,8 @@ class Analysis:
     container: container.Container | None = None
     # The same flows on the base revision, by position, when --split asked for them (decision 37).
     base_flows: list[graph.Flow] = field(default_factory=list)
+    # The repository the command was invoked in; root is the head worktree for an A..B range.
+    origin: Path | None = None
 
 
 Visitor = Callable[[lsp.LspClient, graph.Graph, list[graph.Flow], Analysis], None]
@@ -97,6 +99,18 @@ def repo_root(repo: Path) -> Path | None:
         return None
 
 
+def last_run(repo: Path) -> tuple[Path, Path] | int:
+    """The repository a verb was invoked in, and the tree the last play recorded in."""
+    root = repo_root(repo)
+    if root is None:
+        return EXIT_TOOL_ERROR
+    try:
+        return root, worktree.last_run_tree(root)
+    except worktree.WorktreeError as err:
+        print(err, file=sys.stderr)
+        return EXIT_NOTHING
+
+
 def revisions(root: Path, ref: str | None) -> changes.Revisions:
     """No ref: the working tree against HEAD. A: HEAD against A. A..B: B against A."""
     if ref is None:
@@ -122,6 +136,7 @@ def analyse(args: argparse.Namespace, visit: Visitor | None = None) -> Analysis 
         return EXIT_TOOL_ERROR
 
     revs = revisions(root, args.ref)
+    origin = root
     try:
         if ".." in (args.ref or ""):
             root, revs = head_checkout(root, revs)
@@ -170,7 +185,7 @@ def analyse(args: argparse.Namespace, visit: Visitor | None = None) -> Analysis 
         print("missing language servers:\n  " + "\n  ".join(unavailable), file=sys.stderr)
         return EXIT_TOOL_ERROR
 
-    analysis = Analysis(root, revs, container=ctr)
+    analysis = Analysis(root, revs, container=ctr, origin=origin)
     for config, server_hunks in by_server.items():
         client = lsp.LspClient(config, root, timeout=args.timeout)
         try:
