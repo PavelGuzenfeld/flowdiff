@@ -71,13 +71,24 @@ def test_layered_image_is_built_once_per_base_digest(fake, tmp_path: Path):
     fake.images["proj:dev"]["id"] = "sha256:base2"
     container.layered_image(root, "proj:dev")
     assert len([c for c in fake.calls if c[1] == "build"]) == 2
-    assert fake.images["flowdiff/proj:dev"]["labels"]["flowdiff.base"] == "sha256:base2"
+    assert fake.images["flowdiff/proj:dev"]["labels"]["flowdiff.base"] == container.layer_key("sha256:base2")
 
 
-def test_layer_dockerfile_adds_the_debugger_and_language_server_and_labels_the_base():
-    text = container.LAYER_DOCKERFILE.format(base="proj:dev", label=container.LAYER_LABEL, digest="sha256:x")
-    assert text.startswith("FROM proj:dev\n") and "gdb" in text and "clangd" in text and "binutils" in text
-    assert text.rstrip().endswith("LABEL flowdiff.base=sha256:x")
+def test_a_changed_layer_recipe_rebuilds_as_a_changed_base_does(fake, tmp_path: Path, monkeypatch):
+    root = tmp_path / "proj"
+    container.layered_image(root, "proj:dev")
+    assert len([c for c in fake.calls if c[1] == "build"]) == 1
+    monkeypatch.setattr(container, "LAYER_DOCKERFILE", container.LAYER_DOCKERFILE + "RUN true\n")
+    container.layered_image(root, "proj:dev")
+    assert len([c for c in fake.calls if c[1] == "build"]) == 2
+
+
+def test_the_layer_installs_a_clangd_that_answers_outgoing_calls_and_keeps_a_fallback():
+    text = container.layer_recipe("proj:dev", "sha256:x")
+    assert text.startswith("FROM proj:dev\n") and "gdb" in text and "binutils" in text
+    assert "apt.llvm.org" in text and f"clangd-{container.CLANGD_VERSION}" in text
+    assert "keeping the distribution one" in text
+    assert text.rstrip().endswith("LABEL flowdiff.base=" + container.layer_key("sha256:x"))
 
 
 def test_docker_failures_raise_with_the_subcommand(fake):
