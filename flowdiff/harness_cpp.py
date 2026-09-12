@@ -58,6 +58,55 @@ def target_of(tree: Path, entry: dict, workdir: str | None) -> tuple[Path, str] 
     return None
 
 
+def output_flag(entry: dict) -> str:
+    """CMake names the object after -o in the command rather than in an output field."""
+    words = shlex.split(entry["command"]) if "command" in entry else list(entry.get("arguments", []))
+    for i, word in enumerate(words):
+        if word == "-o" and i + 1 < len(words):
+            return words[i + 1]
+    return ""
+
+
+def object_of(tree: Path, entry: dict, workdir: str | None) -> Path | None:
+    """The object this entry produced; the name the entry itself gives, since two targets can compile one
+    source and only this entry's own object dates this entry's compile."""
+    named = entry.get("output") or output_flag(entry)
+    if not named:
+        return None
+    candidate = host_dir(tree, entry, workdir) / named
+    return candidate if candidate.is_file() else None
+
+
+# A changed header has no compile entry of its own, so only translation units can be dated this way.
+TU_SUFFIXES = frozenset({".c", ".cc", ".cpp", ".cxx", ".cu"})
+
+
+def unusable_after_build(tree: Path, sources: list[Path], workdir: str | None) -> str | None:
+    """Why a failed build's artefacts cannot carry the analysis, or None when they can. A build that broke
+    elsewhere still answers the question; one that left an object older than its source answers it wrongly."""
+    db = container.compile_database(tree)
+    if db is None:
+        return "no compile database was written"
+    by_source: dict[str, dict] = {}
+    for entry in container.entries_of(db):
+        try:
+            by_source.setdefault(source_of(tree, entry, workdir).relative_to(tree.resolve()).as_posix(), entry)
+        except ValueError:
+            continue
+    for rel in sorted({s.as_posix() for s in sources if s.suffix in TU_SUFFIXES}):
+        if not (tree / rel).is_file():
+            continue        # a unit the change deleted has nothing left to be stale against
+        entry = by_source.get(rel)
+        if entry is None:
+            return f"{rel} is not in the compile database"
+        obj = object_of(tree, entry, workdir)
+        if obj is None:
+            return f"{rel} has no object in the build tree"
+        if obj.stat().st_mtime < (tree / rel).stat().st_mtime:
+            return f"{obj.relative_to(tree).as_posix()} is older than {rel}"
+    return None
+
+
 def artefact_of(objects: Path, target: str) -> Path | None:
     """The built artefact for a target: meson's sits beside the .p dir under its own name, CMake's is the
     executable or lib<target>.so in the build directory."""
