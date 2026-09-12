@@ -1,3 +1,5 @@
+import json
+import os
 from pathlib import Path
 
 import pytest
@@ -318,3 +320,52 @@ def test_parser_accepts_a_base_ref_and_overrides():
     args = cli.build_parser().parse_args(["origin/main", "--hops", "5", "--full", "--no-tests"])
     assert (args.ref, args.hops) == ("origin/main", 5)
     assert args.no_tests is True and args.full is True
+
+
+def cpp_repo_with_artefacts(repo: Path, fresh: bool) -> None:
+    """pkg/a.cpp changed against HEAD, with a compile database and an object built from it."""
+    (repo / "pkg").mkdir()
+    (repo / "pkg" / "package.xml").write_text("<package><name>pkg_lib</name></package>")
+    (repo / "pkg" / "a.cpp").write_text("int f(int x) {\n    return x + 1;\n}\n")
+    (repo / ".gitignore").write_text("build/\n")
+    git(repo, "add", "pkg", ".gitignore")
+    git(repo, "commit", "-q", "-m", "cpp")
+    (repo / "pkg" / "a.cpp").write_text("int f(int x) {\n    return x + 2;\n}\n")
+    obj = repo / "build" / "pkg" / "CMakeFiles" / "lib.dir" / "a.cpp.o"
+    obj.parent.mkdir(parents=True)
+    obj.write_text("")
+    (repo / "build" / "pkg" / "compile_commands.json").write_text(json.dumps([
+        {"directory": "/src/build/pkg", "file": "/src/pkg/a.cpp",
+         "command": "/usr/bin/c++ -o CMakeFiles/lib.dir/a.cpp.o -c /src/pkg/a.cpp"}]))
+    os.utime(repo / "pkg" / "a.cpp", (1_000_000, 1_000_000))
+    stamp = 2_000_000 if fresh else 500_000
+    os.utime(obj, (stamp, stamp))
+
+
+def cpp_analyse(monkeypatch, repo: Path, failure: str | None):
+    from flowdiff import container, lsp
+    from fake_client import FakeClient, symbol
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/x")
+    monkeypatch.setattr(container, "detect", lambda root, image: container.Container("img", "/src"))
+    monkeypatch.setattr(container, "build", lambda c, tree, timeout: failure)
+    f = symbol("f", repo / "pkg" / "a.cpp", 0, last=2)
+    monkeypatch.setattr(lsp, "LspClient", lambda cfg, root, timeout: FakeClient(root, {"f": f}, {}, language="cpp"))
+    monkeypatch.setattr(changes, "comment_spans", lambda *a: [])
+    return cli.analyse(cli.build_parser().parse_args(["--repo", str(repo), "--no-tests"]))
+
+
+def test_a_build_that_failed_elsewhere_still_analyses_the_change(monkeypatch, repo: Path, capsys):
+    cpp_repo_with_artefacts(repo, fresh=True)
+    analysis = cpp_analyse(monkeypatch, repo, "ninja: tests/other.cpp:3:10: fatal error: missing.h\n  3 | #include")
+    assert isinstance(analysis, cli.Analysis)
+    assert [n.name for fl in analysis.flows for n in fl.changed] == ["f"]
+    assert analysis.warnings[0] == ("the build failed but the flow's artefacts are present and current: "
+                                    "ninja: tests/other.cpp:3:10: fatal error: missing.h")
+
+
+def test_a_build_that_left_an_object_older_than_the_change_stops_the_run(monkeypatch, repo: Path, capsys):
+    cpp_repo_with_artefacts(repo, fresh=False)
+    assert cpp_analyse(monkeypatch, repo, "ninja: broken") == 1
+    err = capsys.readouterr().err
+    assert "ninja: broken" in err
+    assert "build/pkg/CMakeFiles/lib.dir/a.cpp.o is older than pkg/a.cpp" in err

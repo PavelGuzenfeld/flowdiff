@@ -132,7 +132,7 @@ def test_cpp_plan_falls_back_to_test_executables_and_reports_each_failure(tmp_pa
     fake.build_failure = "ninja: broken"
     other = tmp_path / ".flowdiff" / "other"
     other.mkdir()
-    assert plan.drive("base", other) == "ninja: broken"
+    assert plan.drive("base", other) == "ninja: broken\nno compile database was written"
     literal_plan = play.cpp_plan(ctr, FakeClient(tmp_path, {}, {}), flow_of(tmp_path, language="cpp")[0], tmp_path, base, out, 3, 9.0, 99.0)
     fake.literal = ["1"]
     fake.harness_failure = "harness compile failed"

@@ -12,7 +12,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable
 
-from . import changes, container, graph, lsp, render, worktree
+from . import changes, container, graph, harness_cpp, lsp, render, worktree
 
 EXIT_OK, EXIT_TOOL_ERROR, EXIT_NOTHING, EXIT_DIFF = 0, 1, 2, 3
 REQUIRED_BINARIES = {"git": "apt install git", "ast-grep": "cargo install ast-grep or a release binary",
@@ -141,6 +141,7 @@ def analyse(args: argparse.Namespace, visit: Visitor | None = None) -> Analysis 
     # A changed test is a covering test (decision 39), never a frame: pytest is its only caller.
     source_hunks = [h for h in hunks if not graph.is_test_path(root / h.path, root)]
     ctr = None
+    build_warnings: list[str] = []
     if any(h.path.suffix in lsp.CPP_EXTENSIONS for h in source_hunks):
         try:
             ctr = container.detect(root, args.image)
@@ -150,8 +151,12 @@ def analyse(args: argparse.Namespace, visit: Visitor | None = None) -> Analysis 
                 print(f"building the working tree in {ctr.image}", file=sys.stderr)
                 failure = container.build(ctr, root, args.build_timeout)
                 if failure:
-                    print(failure, file=sys.stderr)
-                    return EXIT_TOOL_ERROR
+                    unusable = harness_cpp.unusable_after_build(root, [h.path for h in source_hunks], ctr.workdir)
+                    if unusable is not None:
+                        print(f"{failure}\n{unusable}", file=sys.stderr)
+                        return EXIT_TOOL_ERROR
+                    build_warnings.append(f"the build failed but the flow's artefacts are present and current: "
+                                          f"{failure.splitlines()[0]}")
         except container.ContainerError as err:
             print(f"container: {err}", file=sys.stderr)
             return EXIT_TOOL_ERROR
@@ -170,7 +175,7 @@ def analyse(args: argparse.Namespace, visit: Visitor | None = None) -> Analysis 
         print("missing language servers:\n  " + "\n  ".join(unavailable), file=sys.stderr)
         return EXIT_TOOL_ERROR
 
-    analysis = Analysis(root, revs, container=ctr)
+    analysis = Analysis(root, revs, container=ctr, warnings=build_warnings)
     for config, server_hunks in by_server.items():
         client = lsp.LspClient(config, root, timeout=args.timeout)
         try:
