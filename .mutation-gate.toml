@@ -1,5 +1,4 @@
 language = "python"
-source_paths = ["flowdiff"]
 test_paths = ["tests"]
 
 # The project venv, so the hook does not depend on which shell the commit comes from.
