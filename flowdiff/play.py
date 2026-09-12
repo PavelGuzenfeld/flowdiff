@@ -156,15 +156,22 @@ def cpp_plan(ctr: container.Container, client: lsp.LspClient, flow: graph.Flow, 
     plan = Plan(frames)
     test_files = sorted({t.split("::")[0] for t in flow.tests})
     head_exes = harness_cpp.test_executables(root, test_files, ctr.workdir)
+    entry_rel = harness_cpp.frame_id(root, flow.entry).split(":", 1)[0] if flow.entry is not None else ""
     literal = harness_cpp.harvest(client, root, flow.entry) if flow.entry is not None else None
+    own_main = literal is not None and flow.entry is not None and harness_cpp.defines_main(flow.entry.path)
+    if own_main:
+        literal = None
     if literal is None and not head_exes:
-        plan.stop = "no call site with literal arguments and no built test executable reaches this flow; nothing can drive it"
+        plan.stop = (f"{entry_rel} defines main, so the literal harness cannot include it, and no built test "
+                     "executable reaches this flow; a covering test is the way into this entry") if own_main else \
+            "no call site with literal arguments and no built test executable reaches this flow; nothing can drive it"
         return plan
+    if own_main:
+        plan.warnings.append(f"{entry_rel} defines main; driven by its test executables instead of a literal harness")
     built: set[Path] = {root}
     traces = {side: out_dir / f"flow{index}.{side}.jsonl" for side in ("base", "head")}
     gdb_frames = harness_cpp.gdb_frames(root, flow)
     tests = harness_cpp.test_symbols(flow.tests)
-    entry_rel = harness_cpp.frame_id(root, flow.entry).split(":", 1)[0] if flow.entry is not None else ""
     call = f"{flow.entry.qualified}({', '.join(literal)})" if flow.entry is not None and literal is not None else ""
 
     def ensure_built(tree: Path) -> str | None:

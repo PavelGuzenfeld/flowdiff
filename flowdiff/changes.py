@@ -195,9 +195,15 @@ def comment_spans(language: str, suffix: str, text: str) -> list[tuple[int, int]
 
 
 def scan_kinds(language: str, suffix: str, text: str, kinds: tuple[str, ...]) -> list[dict[str, Any]]:
-    if not text.strip() or not kinds:
+    if not kinds:
         return []
     rule = f"id: kinds\nlanguage: {language}\nrule:\n  any:\n" + "".join(f"    - kind: {k}\n" for k in kinds)
+    return scan_rule(rule, suffix, text)
+
+
+def scan_rule(rule: str, suffix: str, text: str) -> list[dict[str, Any]]:
+    if not text.strip():
+        return []
     with tempfile.NamedTemporaryFile("w", suffix=suffix, delete_on_close=False) as f:
         f.write(text)
         f.close()
