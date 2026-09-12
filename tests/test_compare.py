@@ -246,6 +246,103 @@ def test_divergences_are_per_leaf_and_the_verdict_names_paths_not_values():
     assert compare.verdict(r) == "1 of 1 frames differ: f (cfg.b[1], cfg.c, return.ok); origin f"
 
 
+def test_within_tolerance_is_exact_at_the_boundary_and_needs_an_explicit_budget():
+    # 1.0, 1.25, 1.5 and 0.25 are all exact in binary floating point, so <= at the budget is observable.
+    assert compare.within_tolerance(1.0, 1.000000001, None, None) is False
+    assert compare.within_tolerance(1.0, 1.25, 0.25, None) is True
+    assert compare.within_tolerance(1.0, 1.5, 0.25, None) is False
+    assert compare.within_tolerance(4.0, 5.0, None, 0.25) is True
+    assert compare.within_tolerance(4.0, 8.0, None, 0.25) is False
+
+
+def test_within_tolerance_relative_budget_scales_off_the_larger_magnitude():
+    # bound off the larger magnitude (200) is 100, matching the diff exactly; off the smaller (100) it would be 50.
+    assert compare.within_tolerance(100.0, 200.0, None, 0.5) is True
+    assert compare.within_tolerance(200.0, 100.0, None, 0.5) is True  # same bound whichever side is larger
+    assert compare.within_tolerance(10.0, 10.5, None, 0.01) is False  # a bare rel_tol has no absolute floor
+
+
+def test_within_tolerance_never_forgives_non_numeric_or_bool_leaves():
+    assert compare.within_tolerance(True, False, 1.0, 1.0) is False
+    assert compare.within_tolerance(1, True, 1.0, 1.0) is False
+    assert compare.within_tolerance(True, 1.0000000005, 1e-9, None) is False
+    assert compare.within_tolerance("1.0", 1.0, 1.0, 1.0) is False
+    assert compare.within_tolerance(1.0, 1.0, None, None) is False
+    # C++ values arrive as gdb text; two numeric-looking strings are not floats and stay exact.
+    assert compare.within_tolerance("1.0", "1.0000000005", 1e-9, None) is False
+
+
+def test_within_tolerance_is_scoped_to_floats_so_two_plain_ints_stay_exact():
+    assert compare.within_tolerance(3, 4, 5.0, None) is False
+    assert compare.within_tolerance(3, 4.0, 5.0, None) is True
+
+
+def test_within_tolerance_takes_whichever_budget_is_more_permissive():
+    assert compare.within_tolerance(1.0, 1.1, 0.2, None) is True   # abs alone covers it
+    assert compare.within_tolerance(1.0, 1.1, None, 0.01) is False  # rel alone does not
+    assert compare.within_tolerance(1.0, 1.1, 0.2, 0.01) is True   # both set: the wider bound wins
+
+
+def test_divergences_forgive_a_float_leaf_within_the_stated_absolute_tolerance():
+    base = {"f": [compare.Call(1, {}, 1.0, end=1)]}
+    head = {"f": [compare.Call(1, {}, 1.0000000005, end=1)]}
+    exact = compare.Report(["f"], base, head)
+    assert exact.divergences("f") == [compare.Divergence("f", 0, "return", 1.0, 1.0000000005, 1)]
+    forgiving = compare.Report(["f"], base, head, float_tol=1e-9)
+    assert forgiving.divergences("f") == [] and forgiving.differing() == []
+
+
+def test_divergences_forgive_a_float_leaf_nested_in_a_struct_or_list():
+    base = {"f": [compare.Call(1, {"cfg": obj("Cfg", a=1, xs=[1.0, 2.0])}, 4, end=1)]}
+    head = {"f": [compare.Call(1, {"cfg": obj("Cfg", a=1, xs=[1.0, 2.0000000005])}, 4, end=1)]}
+    exact = compare.Report(["f"], base, head)
+    assert exact.divergences("f") == [compare.Divergence("f", 0, "cfg.xs[1]", 2.0, 2.0000000005, 1)]
+    forgiving = compare.Report(["f"], base, head, float_tol=1e-9)
+    assert forgiving.divergences("f") == [] and forgiving.changed_paths("f") == ""
+
+
+def test_forgiveness_is_per_leaf_a_genuine_divergence_in_the_same_call_still_shows():
+    base = {"f": [compare.Call(1, {"cfg": obj("Cfg", a=1.0, b=100.0)}, 4, end=1)]}
+    head = {"f": [compare.Call(1, {"cfg": obj("Cfg", a=1.0000000005, b=999.0)}, 4, end=1)]}
+    forgiving = compare.Report(["f"], base, head, float_tol=1e-9)
+    assert forgiving.divergences("f") == [compare.Divergence("f", 0, "cfg.b", 100.0, 999.0, 1)]
+    assert forgiving.differing() == ["f"] and forgiving.changed_paths("f") == "cfg.b"
+
+
+def test_divergences_forgive_within_relative_tolerance_but_not_past_it():
+    base = {"f": [compare.Call(1, {}, 1000.0, end=1)]}
+    head = {"f": [compare.Call(1, {}, 1009.0, end=1)]}
+    forgiving = compare.Report(["f"], base, head, float_rtol=0.01)
+    assert forgiving.divergences("f") == []
+    strict = compare.Report(["f"], base, head, float_rtol=0.001)
+    assert strict.divergences("f") == [compare.Divergence("f", 0, "return", 1000.0, 1009.0, 1)]
+
+
+def test_show_still_prints_a_leaf_the_verdict_forgave():
+    base = {"f": [compare.Call(1, {}, 1.0, end=1)]}
+    head = {"f": [compare.Call(1, {}, 1.0000000005, end=1)]}
+    forgiving = compare.Report(["f"], base, head, float_tol=1e-9)
+    assert forgiving.differing() == []
+    assert compare.show(forgiving, "f").splitlines() == [
+        "f  base 1 call(s), head 1 call(s)", "  calls #1", "    return  1.0  →  1.0000000005"]
+
+
+def test_verdict_names_the_tolerance_when_set_and_omits_it_otherwise():
+    same = {"f": [compare.Call(1, {}, 1.0, end=1)]}
+    close = {"f": [compare.Call(1, {}, 1.0000000005, end=1)]}
+    assert compare.verdict(compare.Report(["f"], same, same)) == "identical: 1 frames traced, no value differs"
+    assert compare.verdict(compare.Report(["f"], same, close, float_tol=1e-9)) == \
+        "identical: 1 frames traced, no value differs  (float tolerance abs=1e-09)"
+    assert compare.verdict(compare.Report(["f"], same, close, float_rtol=1e-6)) == \
+        "identical: 1 frames traced, no value differs  (float tolerance rel=1e-06)"
+    exact = compare.Report(["f"], same, close)
+    assert compare.verdict(exact) == "1 of 1 frames differ: f (return); origin f"
+    # A budget that does not cover every leaf still names itself on the "frames differ" line.
+    far = {"f": [compare.Call(1, {}, 5.0, end=1)]}
+    still_differs = compare.Report(["f"], same, far, float_tol=1e-9)
+    assert compare.verdict(still_differs) == "1 of 1 frames differ: f (return); origin f  (float tolerance abs=1e-09)"
+
+
 def test_changed_paths_dedupe_across_calls_and_name_one_sided_calls():
     base = {"f": [compare.Call(1, {"x": 1}, 4, end=2), compare.Call(3, {"x": 1}, 4, end=4)]}
     head = {"f": [compare.Call(1, {"x": 1}, 5, end=2), compare.Call(3, {"x": 1}, 6, end=4), compare.Call(5, {}, 0, end=6)]}

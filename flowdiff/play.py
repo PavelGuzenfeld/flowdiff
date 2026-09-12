@@ -296,7 +296,8 @@ def run(args: argparse.Namespace) -> int:
                 return cli.EXIT_TOOL_ERROR
         one_sided = {f for f, node in zip(plan.frames, [n for n in flow.frames if n.status != "slot"])
                      if node.status in ("added", "removed")}
-        report = compare.Report(plan.frames, compare.load(traces["base"]), compare.load(traces["head"]), one_sided)
+        report = compare.Report(plan.frames, compare.load(traces["base"]), compare.load(traces["head"]), one_sided,
+                                args.float_tol, args.float_rtol)
         print(compare.verdict(report))
         for line in plan.trailer:
             print(line)

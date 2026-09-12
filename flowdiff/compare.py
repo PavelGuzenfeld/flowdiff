@@ -86,6 +86,22 @@ def leaves(base: Any, head: Any, path: str = "") -> list[tuple[str, Any, Any]]:
     return [] if base == head else [(path, base, head)]
 
 
+def within_tolerance(base: Any, head: Any, abs_tol: float | None, rel_tol: float | None) -> bool:
+    """At least one side is a float within the stated budget (decision: no tolerance without a stated reason,
+    so exact unless a budget is given, and scoped to floats — two plain ints stay exact); bool is not numeric
+    here even though it subclasses int. Either budget alone is enough; both widen the bound, they never narrow it."""
+    if abs_tol is None and rel_tol is None:
+        return False
+    if isinstance(base, bool) or isinstance(head, bool):
+        return False
+    if not isinstance(base, (int, float)) or not isinstance(head, (int, float)):
+        return False
+    if not isinstance(base, float) and not isinstance(head, float):
+        return False
+    bound = max(abs_tol or 0.0, (rel_tol or 0.0) * max(abs(base), abs(head)))
+    return abs(head - base) <= bound
+
+
 def is_marker(value: Any) -> bool:
     """A summariser stand-in for something not recorded whole: {"type": T} alone, or with len/shape and a hash."""
     return isinstance(value, dict) and "type" in value and "fields" not in value
@@ -156,9 +172,14 @@ class Report:
     head: dict[str, list[Call]]
     # Added and removed frames: calls on one side only are what the marker already says, not a divergence.
     one_sided: set[str] = field(default_factory=set)
+    # Opt-in numeric budget (decisions on floats): unset means exact, as everywhere else.
+    float_tol: float | None = None
+    float_rtol: float | None = None
 
     def _leaf_divergences(self, frame: str) -> list[Divergence]:
-        """Every differing leaf for a frame, volatile ones included; divergences()/volatile() split by is_volatile."""
+        """Every differing leaf for a frame, volatile ones included; divergences()/volatile() split by is_volatile.
+        A float leaf within the stated tolerance is not a divergence, even though `show` still lists it (leaves()
+        itself stays exact) so a drift that stays inside the budget is visible rather than erased."""
         base, head = self.base.get(frame, []), self.head.get(frame, [])
         out = []
         for i in range(max(len(base), len(head))):
@@ -173,7 +194,8 @@ class Report:
             for key in [k for k in b if k not in ("return", "raises")] + ["raises", "return"]:
                 if key in b or key in h:
                     out += [Divergence(frame, i, path, lb, lh, head[i].observed_at(key))
-                            for path, lb, lh in leaves(b.get(key, MISSING), h.get(key, MISSING), key)]
+                            for path, lb, lh in leaves(b.get(key, MISSING), h.get(key, MISSING), key)
+                            if not within_tolerance(lb, lh, self.float_tol, self.float_rtol)]
         return out
 
     def divergences(self, frame: str) -> list[Divergence]:
@@ -219,12 +241,20 @@ def volatility_note(report: Report) -> str:
     return f"; excluded as volatile: {shown}{more}"
 
 
+def tolerance_note(report: Report) -> str:
+    if report.float_tol is None and report.float_rtol is None:
+        return ""
+    parts = [f"{kind}={value:g}" for kind, value in (("abs", report.float_tol), ("rel", report.float_rtol))
+            if value is not None]
+    return f"  (float tolerance {', '.join(parts)})"
+
+
 def verdict(report: Report) -> str:
     traced = report.traced()
     if not traced:
         return "no flow frame was reached: the harness ran but traced nothing"
+    note = tolerance_note(report) + volatility_note(report)
     differing = report.differing()
-    note = volatility_note(report)
     if not differing:
         return f"identical: {len(traced)} frames traced, no value differs{note}"
     origin = report.origin()
