@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import keyword
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import cli, compare, harness_py, worktree
@@ -52,10 +54,10 @@ def literal(value: object) -> str | None:
     return repr(value)
 
 
-def call_source(module: str, name: str, args: dict) -> str | None:
+def call_source(module: str, name: str, args: dict, bound: dict[str, str] = {}) -> str | None:
     parts = []
     for key, value in args.items():
-        text = literal(value)
+        text = bound.get(key) or literal(value)
         if text is None:
             return None
         if key.startswith("**"):
@@ -67,46 +69,89 @@ def call_source(module: str, name: str, args: dict) -> str | None:
     return f"{module}.{name}({', '.join(parts)})"
 
 
-def cases(module: str, name: str, calls: list[compare.Call]) -> list[tuple[str, str, bool]]:
-    """(call, expected, whole) per distinct recorded call; whole is False when only a summary can be asserted."""
-    out: list[tuple[str, str, bool]] = []
-    for call in calls:
-        source = call_source(module, name, call.args)
-        if source is None or call.raises is not None or call.result is compare.MISSING:
+@dataclass(frozen=True)
+class Case:
+    """One recorded call as a test: a call, the literals bound to names first when it writes into one."""
+    call: str
+    binds: tuple[tuple[str, str], ...] = ()
+    checks: tuple[tuple[str, str, bool], ...] = ()
+
+
+def bindable(module: str, arg: str) -> bool:
+    """A mutated argument can only be asserted through a name the emitted test can safely introduce."""
+    return arg.isidentifier() and not keyword.iskeyword(arg) and arg not in ("result", module.split(".")[0])
+
+
+def case_of(module: str, name: str, call: compare.Call) -> tuple[Case | None, list[str]]:
+    """The case for one call, and the arguments it mutated that no literal can stand in for."""
+    binds: list[tuple[str, str]] = []
+    pins: list[tuple[str, str, bool]] = []
+    unpinned: list[str] = []
+    for arg, after in call.mutated().items():
+        before, expected = literal(call.args[arg]), literal(after)
+        if not bindable(module, arg) or before is None:
+            unpinned.append(arg.lstrip("*"))
             continue
-        expected = literal(call.result)
-        case = (source, expected, True) if expected is not None else (source, json.dumps(call.result), False)
-        if case not in out:
+        binds.append((arg, before))
+        pins.append((arg, expected, True) if expected is not None else (arg, json.dumps(after), False))
+    source = call_source(module, name, call.args, {a: a for a, _ in binds})
+    if source is None:
+        return None, unpinned
+    returned = literal(call.result)
+    subject = "result" if binds else source
+    check = (subject, returned, True) if returned is not None else (subject, json.dumps(call.result), False)
+    return Case(source, tuple(binds), (check, *pins)), unpinned
+
+
+def cases(module: str, name: str, calls: list[compare.Call]) -> tuple[list[Case], list[str]]:
+    """The distinct recorded calls as cases, and the mutated arguments none of them could pin."""
+    out: list[Case] = []
+    unpinned: list[str] = []
+    for call in calls:
+        if call.raises is not None or call.result is compare.MISSING:
+            continue
+        case, missed = case_of(module, name, call)
+        unpinned += [m for m in missed if m not in unpinned]
+        if case is not None and case not in out:
             out.append(case)
-    return out[:MAX_CASES]
+    return out[:MAX_CASES], unpinned
 
 
 HEADER = '"""Golden flow test written by flowdiff keep; rerun keep after a deliberate behaviour change."""\n'
 
 
-def emit(module: str, name: str, found: list[tuple[str, str, bool]], dialect: str) -> str:
+def emit(module: str, name: str, found: list[Case], dialect: str) -> str:
     imports = [f"import {module}"]
-    if any(not whole for _, _, whole in found):
+    if any(not whole for case in found for _, _, whole in case.checks):
         imports.append("from flowdiff.summarise import summarise")
 
     def check(source: str, expected: str, whole: bool) -> str:
         actual = source if whole else f"summarise({source})"
         return f"self.assertEqual({actual}, {expected})" if dialect == "unittest" else f"assert {actual} == {expected}"
 
+    def statements(case: Case) -> list[str]:
+        """A call that writes into an argument runs as a statement, so the names can be asserted after it."""
+        lead = [f"{n} = {v}" for n, v in case.binds] + [f"result = {case.call}"] if case.binds else []
+        return lead + [check(*c) for c in case.checks]
+
     if dialect == "unittest":
         imports.insert(0, "import unittest")
         body = [f"class Flow{name.title().replace('_', '')}(unittest.TestCase):"]
-        for i, (source, expected, whole) in enumerate(found, 1):
-            body += [f"    def test_{i}(self):", f"        {check(source, expected, whole)}", ""]
+        for i, case in enumerate(found, 1):
+            body += [f"    def test_{i}(self):"] + [f"        {s}" for s in statements(case)] + [""]
         body.append("")
     elif dialect == "pytest":
         body = []
-        for i, (source, expected, whole) in enumerate(found, 1):
-            body += [f"def test_flow_{name}_{i}():", f"    {check(source, expected, whole)}", "", ""]
+        for i, case in enumerate(found, 1):
+            body += [f"def test_flow_{name}_{i}():"] + [f"    {s}" for s in statements(case)] + ["", ""]
         body = body[:-1]
     else:
-        body = [check(source, expected, whole) for source, expected, whole in found] + [""]
+        body = [s for case in found for s in statements(case)] + [""]
     return HEADER + "\n".join(imports) + "\n\n\n" + "\n".join(body).rstrip("\n") + "\n"
+
+
+def unpinned_note(names: list[str]) -> str:
+    return f"; mutated but not asserted: {', '.join(names)}" if names else ""
 
 
 CPP_SUFFIXES = (".cpp", ".cc", ".cxx", ".c")
@@ -140,36 +185,55 @@ def cpp_literal(value: object) -> str | None:
     return None
 
 
-def cpp_cases(name: str, calls: list[compare.Call]) -> list[tuple[str, list[tuple[str, str]]]]:
-    """(call expression, [(member path, literal)]) per distinct call whose arguments are all scalars;
-    a struct return is asserted one field level down, a scalar return as a whole."""
-    out: list[tuple[str, list[tuple[str, str]]]] = []
+def cpp_cases(name: str, calls: list[compare.Call]) -> tuple[list[Case], list[str]]:
+    """Distinct calls whose arguments are all scalars, and the mutated arguments none could pin. A struct
+    return is asserted one field level down, a scalar return as a whole."""
+    out: list[Case] = []
+    unpinned: list[str] = []
     for call in calls:
-        args = [cpp_literal(v) for v in call.args.values()]
-        if call.raises is not None or call.result is compare.MISSING or any(a is None for a in args):
+        if call.raises is not None or call.result is compare.MISSING:
+            continue
+        mutated = call.mutated()
+        binds, pins = [], []
+        for arg, after in mutated.items():
+            before, expected = cpp_literal(call.args[arg]), cpp_literal(after)
+            if not bindable(name, arg) or before is None or expected is None:
+                if arg not in unpinned:
+                    unpinned.append(arg)
+                continue
+            binds.append((arg, before))
+            pins.append((arg, expected, True))
+        args = [arg if arg in dict(binds) else cpp_literal(value) for arg, value in call.args.items()]
+        if any(a is None for a in args):
             continue
         source = f"{name}({', '.join(a for a in args if a is not None)})"
-        result = call.result
-        if isinstance(result, dict) and "fields" in result:
-            checks = [(f".{k}", lit) for k, v in result["fields"].items() if (lit := cpp_literal(v)) is not None]
-        else:
-            lit = cpp_literal(result)
-            checks = [("", lit)] if lit is not None else []
-        if checks and (source, checks) not in out:
-            out.append((source, checks))
-    return out[:MAX_CASES]
+        checks = [(c, lit, True) for c, lit in cpp_return_checks(call.result)]
+        if not checks:
+            continue
+        case = Case(source, tuple(binds), (*checks, *pins))
+        if case not in out:
+            out.append(case)
+    return out[:MAX_CASES], unpinned
 
 
-def emit_cpp(source_include: str, name: str, found: list, dialect: str, include: str) -> str:
+def cpp_return_checks(result: object) -> list[tuple[str, str]]:
+    if isinstance(result, dict) and "fields" in result:
+        return [(f"result.{k}", lit) for k, v in result["fields"].items() if (lit := cpp_literal(v)) is not None]
+    lit = cpp_literal(result)
+    return [("result", lit)] if lit is not None else []
+
+
+def emit_cpp(source_include: str, name: str, found: list[Case], dialect: str, include: str) -> str:
     short = name.rsplit("::", 1)[-1]
     lines = [f"// {HEADER.strip().strip(chr(34))}", f'#include "{source_include}"', include, ""]
     macro = {"harness": "TEST({n})", "gtest": "TEST(FlowKeep, {n})", "catch2": 'TEST_CASE("{n}")',
              "doctest": 'TEST_CASE("{n}")'}.get(dialect)
     check = {"harness": "ASSERT_EQ({a}, {b});", "gtest": "EXPECT_EQ({a}, {b});", "catch2": "CHECK({a} == {b});",
              "doctest": "CHECK({a} == {b});"}.get(dialect, "assert({a} == {b});")
-    for i, (call, checks) in enumerate(found, 1):
+    for i, found_case in enumerate(found, 1):
         case = f"flow_{short}_{i}"
-        body = [f"    auto result = {call};"] + [f"    {check.format(a='result' + member, b=lit)}" for member, lit in checks]
+        body = [f"    auto {n} = {v};" for n, v in found_case.binds] + [f"    auto result = {found_case.call};"] \
+            + [f"    {check.format(a=subject, b=lit)}" for subject, lit, _ in found_case.checks]
         if macro:
             lines += [macro.format(n=case) + " {", *body, "}", ""]
         else:
@@ -181,7 +245,7 @@ def emit_cpp(source_include: str, name: str, found: list, dialect: str, include:
 
 def keep_cpp(root: Path, full: str, calls: list[compare.Call], qualified: str | None = None) -> int:
     path, name = full.split(":", 1)
-    found = cpp_cases(qualified or name, calls)
+    found, unpinned = cpp_cases(qualified or name, calls)
     if not found:
         print(f"{full}: no recorded call has scalar arguments and an assertable return; nothing to keep", file=sys.stderr)
         return cli.EXIT_NOTHING
@@ -192,7 +256,8 @@ def keep_cpp(root: Path, full: str, calls: list[compare.Call], qualified: str | 
     target = test_dir / f"flow_{short}.cpp"
     header = Path(path).with_suffix(".hpp").name if (root / Path(path).with_suffix(".hpp")).is_file() else Path(path).name
     target.write_text(emit_cpp(header, name, found, dialect, include))
-    print(f"{target.relative_to(root)}: {len(found)} case(s), {dialect} dialect; add it to the build to run it")
+    print(f"{target.relative_to(root)}: {len(found)} case(s), {dialect} dialect; add it to the build to run it"
+          + unpinned_note(unpinned))
     return cli.EXIT_OK
 
 
@@ -221,7 +286,7 @@ def run(args: argparse.Namespace) -> int:
             if Path(path).suffix in CPP_SUFFIXES:
                 return keep_cpp(root, full, report.head.get(full, []), entry.get("names", {}).get(full))
             module = harness_py.module_name(root, root / path)
-            found = cases(module, name, report.head.get(full, []))
+            found, unpinned = cases(module, name, report.head.get(full, []))
             if not found:
                 print(f"{full}: no recorded call has literal arguments and a return; nothing to keep", file=sys.stderr)
                 return cli.EXIT_NOTHING
@@ -230,7 +295,7 @@ def run(args: argparse.Namespace) -> int:
             target = test_dir / f"flow_{name}.py"
             target.write_text(emit(module, name, found, detect_dialect(test_dir)))
             print(f"{target.relative_to(root)}: {len(found)} case(s), {detect_dialect(test_dir)} dialect; "
-                  "register it with your test runner if it needs registering")
+                  "register it with your test runner if it needs registering" + unpinned_note(unpinned))
             return cli.EXIT_OK
     print(f"{frame}: not a frame of the last play", file=sys.stderr)
     return cli.EXIT_NOTHING

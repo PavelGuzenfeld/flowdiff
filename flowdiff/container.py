@@ -3,6 +3,7 @@ is mounted, a flowdiff layer over the project's dev image, a run wrapper, and th
 (decisions 25, 44, 45)."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -14,9 +15,19 @@ from typing import Iterable
 from xml.etree import ElementTree
 
 LAYER_LABEL = "flowdiff.base"
+# Measured 2026-09-12: no distribution clangd answers callHierarchy/outgoingCalls — 14 on ubuntu 22.04 and
+# 18 on ubuntu 24.04 both reply "method not found", leaving every C++ flow on the textual callee fallback.
+CLANGD_VERSION = "20"
 LAYER_DOCKERFILE = """\
 FROM {base}
 RUN apt-get update && apt-get install -y --no-install-recommends gdb clangd binutils \\
+    && (apt-get install -y --no-install-recommends ca-certificates wget gnupg lsb-release \\
+        && wget -qO /etc/apt/trusted.gpg.d/apt.llvm.org.asc https://apt.llvm.org/llvm-snapshot.gpg.key \\
+        && echo "deb http://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs)-{llvm} main" \\
+             > /etc/apt/sources.list.d/llvm.list \\
+        && apt-get update && apt-get install -y --no-install-recommends clangd-{llvm} \\
+        && ln -sf /usr/bin/clangd-{llvm} /usr/bin/clangd \\
+        || echo "flowdiff: no apt.llvm.org clangd-{llvm} for this base; keeping the distribution one") \\
     && rm -rf /var/lib/apt/lists/*
 LABEL {label}={digest}
 """
@@ -53,14 +64,23 @@ def project_image(root: Path, explicit: str | None) -> str | None:
     return tag if image_exists(tag) else None
 
 
+def layer_recipe(base: str, digest: str) -> str:
+    return LAYER_DOCKERFILE.format(base=base, label=LAYER_LABEL, digest=layer_key(digest), llvm=CLANGD_VERSION)
+
+
+def layer_key(digest: str) -> str:
+    """The layer is the base image and this recipe, so a changed recipe must rebuild as a changed base does."""
+    return f"{digest}+{hashlib.sha256(LAYER_DOCKERFILE.encode()).hexdigest()[:12]}"
+
+
 def layered_image(root: Path, base: str) -> str:
-    """flowdiff/<project>:dev, rebuilt only when the base image's digest changed (decision 44)."""
+    """flowdiff/<project>:dev, rebuilt when the base image's digest or the layer's own recipe changed (44)."""
     digest = image_field(base, "{{.Id}}")
     tag = f"flowdiff/{root.name}:dev"
-    if image_exists(tag) and image_field(tag, '{{index .Config.Labels "%s"}}' % LAYER_LABEL) == digest:
+    if image_exists(tag) and image_field(tag, '{{index .Config.Labels "%s"}}' % LAYER_LABEL) == layer_key(digest):
         return tag
     with tempfile.TemporaryDirectory(prefix="flowdiff-layer-") as tmp:
-        (Path(tmp) / "Dockerfile").write_text(LAYER_DOCKERFILE.format(base=base, label=LAYER_LABEL, digest=digest))
+        (Path(tmp) / "Dockerfile").write_text(layer_recipe(base, digest))
         docker("build", "-q", "-t", tag, tmp)
     return tag
 

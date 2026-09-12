@@ -150,3 +150,78 @@ def test_unserialisable_values_fall_back_to_repr(tmp_path: Path, lib, backend):
     spec.loader.exec_module(module)
     recs = run(tmp_path, module, ["obj.py:make"], lambda m: m.make())
     assert recs[1]["return"] == {"type": "trace_obj.Weird"}
+
+
+MUTATORS = """\
+def fill(items, n):
+    items.append(n)
+    return len(items)
+
+
+def rebind(items):
+    items = [99]
+    return items[0]
+
+
+def both(left, right):
+    left["k"] = 1
+    return right
+
+
+def untouched(items):
+    return len(items)
+
+
+def blows_up(items):
+    items.append(1)
+    raise ValueError("late")
+"""
+
+
+@pytest.fixture
+def mut(tmp_path: Path):
+    (tmp_path / "lib.py").write_text(MUTATORS)
+    spec = importlib.util.spec_from_file_location("mut_lib", tmp_path / "lib.py")
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_a_mutated_argument_is_recorded_again_at_exit(tmp_path: Path, mut, backend):
+    recs = run(tmp_path, mut, ["lib.py:fill"], lambda m: m.fill([1, 2], 3))
+    assert recs[0]["args"] == {"items": [1, 2], "n": 3}
+    assert recs[1]["after"] == {"items": [1, 2, 3]} and recs[1]["return"] == 3
+
+
+def test_a_rebound_parameter_is_not_reported_as_mutated(tmp_path: Path, mut, backend):
+    recs = run(tmp_path, mut, ["lib.py:rebind"], lambda m: m.rebind([1, 2]))
+    assert "after" not in recs[1]
+
+
+def test_an_argument_aliased_by_another_is_not_watched(tmp_path: Path, mut, backend):
+    shared = {"k": 0}
+    recs = run(tmp_path, mut, ["lib.py:both"], lambda m: m.both(shared, shared))
+    assert "after" not in recs[1]
+    recs = run(tmp_path, mut, ["lib.py:both"], lambda m: m.both({"k": 0}, {"other": 0}))
+    assert recs[1]["after"] == {"left": {"k": 1}, "right": {"other": 0}}
+
+
+def test_an_immutable_argument_is_never_summarised_twice(tmp_path: Path, lib, backend):
+    recs = run(tmp_path, lib, ["lib.py:g"], lambda m: m.g(3))
+    assert "after" not in recs[1]
+
+
+def test_a_frame_that_raises_still_records_what_it_wrote(tmp_path: Path, mut, backend):
+    def action(m):
+        with pytest.raises(ValueError):
+            m.blows_up([])
+    recs = run(tmp_path, mut, ["lib.py:blows_up"], action)
+    assert recs[1]["raises"] == "ValueError" and recs[1]["after"] == {"items": [1]}
+
+
+def test_the_watch_table_does_not_outlive_the_run(tmp_path: Path, mut, backend):
+    out = tmp_path / "trace.jsonl"
+    with trace_py.trace(str(tmp_path), ["lib.py:fill"], str(out)) as tracer:
+        mut.fill([1], 2)
+    assert tracer.watched == {}
