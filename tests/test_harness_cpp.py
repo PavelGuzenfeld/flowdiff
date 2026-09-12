@@ -356,9 +356,16 @@ def test_a_changed_source_with_no_object_or_no_entry_stops_the_run(tmp_path: Pat
     (tree / "build" / "pkg" / "CMakeFiles" / "libutil.dir" / "src" / "util.cpp.o").unlink()
     assert harness_cpp.unusable_after_build(tree, [Path("pkg/src/util.cpp")], "/ws") == \
         "pkg/src/util.cpp has no object in the build tree"
+    (tree / "pkg" / "src" / "new.cpp").write_text("int g();\n")
     assert harness_cpp.unusable_after_build(tree, [Path("pkg/src/new.cpp")], "/ws") == \
         "pkg/src/new.cpp is not in the compile database"
 
 
 def test_a_build_that_wrote_no_compile_database_stops_the_run(tmp_path: Path):
     assert harness_cpp.unusable_after_build(tmp_path, [Path("a.cpp")], "/ws") == "no compile database was written"
+
+
+def test_a_deleted_translation_unit_is_not_read_for_a_timestamp(tmp_path: Path):
+    tree = built_cmake_tree(tmp_path)
+    (tree / "pkg" / "src" / "util.cpp").unlink()
+    assert harness_cpp.unusable_after_build(tree, [Path("pkg/src/util.cpp")], "/ws") is None

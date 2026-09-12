@@ -94,6 +94,8 @@ def unusable_after_build(tree: Path, sources: list[Path], workdir: str | None) -
         except ValueError:
             continue
     for rel in sorted({s.as_posix() for s in sources if s.suffix in TU_SUFFIXES}):
+        if not (tree / rel).is_file():
+            continue        # a unit the change deleted has nothing left to be stale against
         entry = by_source.get(rel)
         if entry is None:
             return f"{rel} is not in the compile database"
