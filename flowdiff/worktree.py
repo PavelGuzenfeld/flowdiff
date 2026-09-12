@@ -1,11 +1,16 @@
 """Scratch state under .flowdiff/ and the persistent base worktree it holds (decisions 25, 26)."""
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 from .changes import git
 
 SCRATCH = ".flowdiff"
+
+
+class WorktreeError(RuntimeError):
+    pass
 
 
 def scratch_dir(root: Path) -> Path:
@@ -33,4 +38,27 @@ def base_worktree(root: Path, ref: str, clean: bool = False, name: str = "base")
         git(base, "checkout", "-q", "--detach", sha)
     else:
         git(root, "worktree", "add", "-q", "--detach", str(base), sha)
+    populate_submodules(root, base)
     return base
+
+
+def submodule_names(tree: Path) -> list[str]:
+    if not (tree / ".gitmodules").exists():
+        return []
+    keys = git(tree, "config", "-f", ".gitmodules", "--name-only", "--get-regexp", r"\.path$")
+    return [key[len("submodule."):-len(".path")] for key in keys.split()]
+
+
+def populate_submodules(root: Path, tree: Path) -> None:
+    """A worktree leaves submodule directories empty and the build fails much later for the wrong reason.
+    Cloning each from the superproject's own module store needs no network and moves no checkout of its own."""
+    names = submodule_names(tree)
+    if not names:
+        return
+    common = (root / git(root, "rev-parse", "--git-common-dir").strip()).resolve()
+    local = [arg for name in names if (stored := common / "modules" / name).is_dir()
+             for arg in ("-c", f"submodule.{name}.url={stored}")]
+    try:
+        git(tree, "-c", "protocol.file.allow=always", *local, "submodule", "update", "--init")
+    except subprocess.CalledProcessError as err:
+        raise WorktreeError(f"{tree}: submodule update failed\n{(err.stderr or '').strip()}")
