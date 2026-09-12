@@ -90,14 +90,43 @@ def summarise(v, depth=0):
         return {"type": "unreadable", "error": str(exc)[:80]}
 
 
+def watch_target(v):
+    """Only a pointer or reference argument can carry a callee's writes back to the caller."""
+    try:
+        t = v.type.strip_typedefs()
+        if t.code in (gdb.TYPE_CODE_REF, getattr(gdb, "TYPE_CODE_RVALUE_REF", -1)):
+            return ("ref", v.referenced_value().address)
+        if t.code == gdb.TYPE_CODE_PTR and int(v) != 0:
+            return ("ptr", v)
+        return None
+    except Exception:
+        return None
+
+
+def after_values(watched):
+    out = {}
+    for name, pair in watched.items():
+        kind, v = pair
+        try:
+            out[name] = summarise(v.dereference() if kind == "ref" else v)
+        except Exception:
+            continue
+    return out
+
+
 class Exit(gdb.FinishBreakpoint):
-    def __init__(self, frame, key):
+    def __init__(self, frame, key, watched):
         super().__init__(frame, internal=True)
         self.key = key
+        self.watched = watched
 
     def stop(self):
         value = self.return_value
-        record("exit", self.key, {"return": None if value is None else summarise(value)})
+        payload = {"return": None if value is None else summarise(value)}
+        after = after_values(self.watched)
+        if after:
+            payload["after"] = after
+        record("exit", self.key, payload)
         return False
 
     def out_of_scope(self):
@@ -112,6 +141,7 @@ class Enter(gdb.Breakpoint):
     def stop(self):
         frame = gdb.selected_frame()
         args = {}
+        watched = {}
         try:
             block = frame.block()
             while block is not None and not block.function:
@@ -119,12 +149,16 @@ class Enter(gdb.Breakpoint):
             if block is not None:
                 for sym in block:
                     if sym.is_argument:
-                        args[sym.name] = summarise(sym.value(frame))
+                        value = sym.value(frame)
+                        args[sym.name] = summarise(value)
+                        target = watch_target(value)
+                        if target is not None:
+                            watched[sym.name] = target
         except Exception as exc:
             args["<unreadable>"] = str(exc)[:80]
         record("enter", self.key, {"args": args})
         try:
-            Exit(frame, self.key)
+            Exit(frame, self.key, watched)
         except Exception:
             pass
         return False

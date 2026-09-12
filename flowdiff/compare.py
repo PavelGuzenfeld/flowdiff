@@ -25,6 +25,11 @@ class Call:
     raises: str | None = None
     end: int | None = None
     test: str | None = None
+    # Watched arguments summarised again at exit; only a caller-visible mutation makes one differ.
+    after: dict[str, Any] = field(default_factory=dict)
+
+    def mutated(self) -> dict[str, Any]:
+        return {n: v for n, v in self.after.items() if n in self.args and v != self.args[n]}
 
     def observed_at(self, field_name: str) -> int:
         return self.end if field_name in ("return", "raises") and self.end is not None else self.seq
@@ -54,6 +59,7 @@ def load(path: Path) -> dict[str, list[Call]]:
         elif open_calls.get(frame):
             call = open_calls[frame].pop()
             call.end = rec["seq"]
+            call.after = rec.get("after", {})
             if "raises" in rec:
                 call.raises = rec["raises"]
             else:
