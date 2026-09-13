@@ -508,3 +508,86 @@ def test_resolve_accepts_the_short_name_or_the_full_frame():
     assert compare.short("gst/t.cpp:Nvmm::Transform::crop") == "Nvmm::Transform::crop"
     assert compare.resolve(r, "crop") == compare.resolve(r, "Nvmm::Transform::crop") == ["gst/t.cpp:Nvmm::Transform::crop"]
     assert compare.resolve(r, "Transform::crop") == []
+
+
+def test_load_records_the_recording_thread_of_each_call(tmp_path: Path):
+    calls = compare.load(write(tmp_path / "t.jsonl", {**enter("f", n=1), "thread": 11}, exit_("f", 1),
+                               enter("f", n=2), exit_("f", 2)))
+    assert [c.thread for c in calls["f"]] == [11, None]
+
+
+def test_unstable_is_false_for_a_single_call_or_a_frame_never_traced():
+    r = report({"f": [compare.Call(1, thread=1)]}, {}, frames=("f", "g"))
+    assert r.unstable("f") is False and r.unstable("g") is False
+
+
+def test_unstable_is_true_when_one_side_sees_more_than_one_thread():
+    base = {"f": [compare.Call(1, thread=1), compare.Call(2, thread=1)]}
+    head = {"f": [compare.Call(1, thread=7), compare.Call(2, thread=8)]}
+    assert report(base, head, frames=("f",)).unstable("f") is True
+    assert report(head, base, frames=("f",)).unstable("f") is True
+
+
+def test_unstable_does_not_compare_thread_ids_across_base_and_head():
+    """Base and head are separate processes: their thread idents are unrelated, so comparing across
+    sides would flag every traced run rather than only the ones actually scheduled unstably."""
+    base = {"f": [compare.Call(1, thread=1), compare.Call(2, thread=1)]}
+    head = {"f": [compare.Call(1, thread=2), compare.Call(2, thread=2)]}
+    assert report(base, head, frames=("f",)).unstable("f") is False
+
+
+def test_unstable_ignores_calls_with_no_recorded_thread():
+    """A trace with no "thread" field (loaded C++ traces, or an older Python trace) leaves Call.thread as
+    None on every call; that must not look like a single shared thread id and trip a false warning."""
+    base = {"f": [compare.Call(1), compare.Call(2)]}
+    assert report(base, {}, frames=("f",)).unstable("f") is False
+
+
+def test_unstable_ignores_a_missing_thread_alongside_a_real_one():
+    """One call recorded before "thread" existed (or lost through a C++ shim) sitting next to one real
+    id must read as a single known thread, not as a second, unknown one worth warning about."""
+    base = {"f": [compare.Call(1, thread=1), compare.Call(2, thread=None)]}
+    assert report(base, {}, frames=("f",)).unstable("f") is False
+
+
+def test_thread_warnings_names_only_the_unstable_frames_with_the_exact_wording():
+    base = {"lib.py:f": [compare.Call(1, thread=1), compare.Call(2, thread=2)],
+            "lib.py:g": [compare.Call(1, thread=1)]}
+    r = report(base, {}, frames=("lib.py:f", "lib.py:g"))
+    assert compare.thread_warnings(r) == ["f: entered from more than one thread; call order is not stable"]
+
+
+def test_thread_warnings_orders_multiple_frames_by_flow_order_not_dict_order_or_alphabetically():
+    unstable = [compare.Call(1, thread=1), compare.Call(2, thread=2)]
+    base = {"alpha": unstable, "zeta": unstable}
+    r = report(base, {}, frames=("zeta", "mid", "alpha"))
+    assert compare.thread_warnings(r) == ["zeta: entered from more than one thread; call order is not stable",
+                                          "alpha: entered from more than one thread; call order is not stable"]
+
+
+def test_thread_warnings_is_empty_when_every_traced_frame_is_single_threaded():
+    base = {"f": [compare.Call(1, thread=1), compare.Call(2, thread=1)]}
+    assert compare.thread_warnings(report(base, {}, frames=("f",))) == []
+
+
+def test_thread_warnings_fires_from_the_head_side_alone():
+    """The unsettling call ordering can show up only after the change: an implementation that reads
+    solely from report.base would miss it, and report.base is the arg order this frame has none of."""
+    base = {"f": [compare.Call(1, thread=1), compare.Call(2, thread=1)]}
+    head = {"f": [compare.Call(1, thread=9), compare.Call(2, thread=8)]}
+    assert compare.thread_warnings(report(base, head, frames=("f",))) == \
+        ["f: entered from more than one thread; call order is not stable"]
+
+
+def test_thread_warnings_names_a_frame_unstable_on_both_sides_exactly_once():
+    unstable = [compare.Call(1, thread=1), compare.Call(2, thread=2)]
+    assert compare.thread_warnings(report({"f": unstable}, {"f": unstable}, frames=("f",))) == \
+        ["f: entered from more than one thread; call order is not stable"]
+
+
+def test_the_thread_field_never_becomes_a_compared_value():
+    """A call's thread id is recording metadata, not part of what the flow computed; two otherwise
+    identical calls that ran on different threads on each side must not be reported as a divergence."""
+    base = {"f": [compare.Call(1, {"x": 1}, 2, thread=1)]}
+    head = {"f": [compare.Call(1, {"x": 1}, 2, thread=2)]}
+    assert report(base, head, frames=("f",)).divergences("f") == []

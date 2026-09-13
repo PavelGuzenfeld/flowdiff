@@ -27,6 +27,7 @@ class Call:
     test: str | None = None
     # Watched arguments summarised again at exit; only a caller-visible mutation makes one differ.
     after: dict[str, Any] = field(default_factory=dict)
+    thread: int | None = None
 
     def mutated(self) -> dict[str, Any]:
         return {n: v for n, v in self.after.items() if n in self.args and v != self.args[n]}
@@ -53,7 +54,7 @@ def load(path: Path) -> dict[str, list[Call]]:
         rec = json.loads(line)
         frame = rec["frame"]
         if rec["event"] == "enter":
-            call = Call(rec["seq"], rec.get("args", {}), test=rec.get("test"))
+            call = Call(rec["seq"], rec.get("args", {}), test=rec.get("test"), thread=rec.get("thread"))
             calls.setdefault(frame, []).append(call)
             open_calls.setdefault(frame, []).append(call)
         elif open_calls.get(frame):
@@ -224,6 +225,19 @@ class Report:
     def origin(self) -> Divergence | None:
         found = [d for f in self.differing() for d in self.divergences(f)]
         return min(found, key=lambda d: d.at) if found else None
+
+    def unstable(self, frame: str) -> bool:
+        """A frame entered from more than one thread, on either side: recorded call order there is not
+        something the trace can trust — scheduling, not the diff, may have picked it."""
+        return any(len({c.thread for c in calls if c.thread is not None}) > 1
+                  for calls in (self.base.get(frame, []), self.head.get(frame, [])))
+
+
+def thread_warnings(report: Report) -> list[str]:
+    """One line per traced frame entered from more than one thread: the recorded call order there is not
+    something the diff can trust, since scheduling rather than the code may have picked it."""
+    return [f"{short(f)}: entered from more than one thread; call order is not stable"
+           for f in report.traced() if report.unstable(f)]
 
 
 def volatility_note(report: Report) -> str:

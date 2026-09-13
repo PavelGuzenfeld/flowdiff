@@ -115,6 +115,34 @@ def test_play_identical_behaviour_says_so(played: Path, capsys):
     assert "identical: 2 frames traced, no value differs" in capsys.readouterr().out
 
 
+def test_play_warns_when_the_head_calls_a_frame_from_more_than_one_thread(project: Path, capsys):
+    """Both sides call clamp twice with the same arguments, so the value comes out identical either way;
+    the head does its second call on a spawned thread, and the warning is the only sign anything changed."""
+    both_calls_once_per_thread = "def scale(value):\n" \
+        "    clamp(value, 100)\n" \
+        "    return clamp(value, 100) * 2"
+    (project / "lib.py").write_text(BEFORE.replace(
+        "def scale(value):\n    return clamp(value, 100) * 2", both_calls_once_per_thread))
+    git(project, "add", "lib.py")
+    git(project, "commit", "-q", "-m", "call clamp twice")
+    (project / "tests").mkdir()
+    (project / "tests" / "test_lib.py").write_text(TEST_WITH_LITERAL)
+    git(project, "add", "tests")
+    git(project, "commit", "-q", "-m", "add test")
+    (project / "lib.py").write_text(BEFORE.replace(
+        "def scale(value):\n    return clamp(value, 100) * 2",
+        "def scale(value):\n"
+        "    import threading\n"
+        "    t = threading.Thread(target=clamp, args=(value, 100))\n"
+        "    t.start()\n"
+        "    t.join()\n"
+        "    return clamp(value, 100) * 2"))
+    assert cli.main(["play", "--repo", str(project), "--no-tests"]) == 0
+    captured = capsys.readouterr()
+    assert "identical: 2 frames traced, no value differs" in captured.out
+    assert "warning: clamp: entered from more than one thread; call order is not stable" in captured.err
+
+
 def test_play_drives_the_flow_from_a_caller_when_the_entry_has_no_literal_site(project: Path, capsys):
     (project / "tests").mkdir()
     (project / "tests" / "test_lib.py").write_text("from lib import entry\n\n\ndef test_entry():\n    assert entry(3) == 6\n")
