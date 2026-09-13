@@ -385,6 +385,32 @@ def test_run_drives_both_sides_prints_the_verdict_and_writes_the_index(repo: Pat
     assert play.run(args_for(repo, "--fail-on-diff")) == 0
 
 
+def test_run_wires_a_thread_warning_from_the_report_into_the_printed_warnings(repo: Path, monkeypatch, capsys):
+    """Same call count and the same return on both sides, so nothing else about the flow diverges: the
+    thread warning must reach stderr on its own, proving play.run actually calls compare.thread_warnings."""
+    flow, nodes = flow_of(repo)
+    fake_analyse(monkeypatch, repo, [flow])
+    frames = ["lib.py:scale", "lib.py:clamp"]
+
+    def calls(threads):
+        recs = []
+        for seq, t in enumerate(threads, start=1):
+            recs.append({"seq": 2 * seq - 1, "event": "enter", "frame": frames[0], "args": {}, "thread": t})
+            recs.append({"seq": 2 * seq, "event": "exit", "frame": frames[0], "return": 8, "thread": t})
+        return recs
+
+    def drive(side, tree):
+        out = repo / ".flowdiff" / "run" / f"flow1.{side}.jsonl"
+        recs = calls([1, 1]) if side == "base" else calls([1, 2])
+        out.write_text("".join(json.dumps(r) + "\n" for r in recs))
+        return None
+
+    plan = play.Plan(frames, drive=drive, driver="lib.py:scale")
+    monkeypatch.setattr(play, "python_plan", lambda *a: plan)
+    assert play.run(args_for(repo)) == 0
+    assert capsys.readouterr().err == "warning: w0\nwarning: scale: entered from more than one thread; call order is not stable\n"
+
+
 def test_run_fail_on_mock_exits_nothing_and_records_the_variant_in_the_index(repo: Path, monkeypatch, capsys):
     flow, nodes = flow_of(repo)
     ctr = container.Container("img", "/src", digest="sha256:x")

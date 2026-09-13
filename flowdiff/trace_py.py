@@ -9,6 +9,7 @@ import inspect
 import json
 import os
 import sys
+import threading
 from collections import Counter
 from typing import Any, Iterable, Optional
 
@@ -37,6 +38,7 @@ class Tracer:
         self.context: Optional[str] = None
         self._tool = None
         self._previous_trace: Any = None
+        self._previous_threading_trace: Any = None
         self.watched: dict = {}
         summarise.load_project_summariser(self.tree, os.environ.get("FLOWDIFF_SCRATCH"))
 
@@ -46,7 +48,7 @@ class Tracer:
 
     def record(self, event: str, key: str, payload: dict) -> None:
         self.seq += 1
-        line = {"seq": self.seq, "event": event, "frame": key}
+        line = {"seq": self.seq, "event": event, "frame": key, "thread": threading.get_ident()}
         if self.context is not None:
             line["test"] = self.context
         line.update(payload)
@@ -94,6 +96,8 @@ class Tracer:
         if monitoring is None:
             self._previous_trace = sys.gettrace()
             sys.settrace(self._settrace)
+            self._previous_threading_trace = getattr(threading, "gettrace", lambda: None)()
+            threading.settrace(self._settrace)
             return
         self._tool = monitoring.PROFILER_ID
         monitoring.use_tool_id(self._tool, "flowdiff")
@@ -110,6 +114,7 @@ class Tracer:
             self._tool = None
         else:
             sys.settrace(self._previous_trace)
+            threading.settrace(self._previous_threading_trace)
         self.watched.clear()
         self.out.close()
 

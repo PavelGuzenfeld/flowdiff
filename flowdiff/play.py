@@ -352,6 +352,7 @@ def run(args: argparse.Namespace) -> int:
                      if node.status in ("added", "removed")}
         report = compare.Report(plan.frames, compare.load(traces["base"]), compare.load(traces["head"]), one_sided,
                                 args.float_tol, args.float_rtol)
+        analysis.warnings += compare.thread_warnings(report)
         print(compare.verdict(report))
         for line in plan.trailer:
             print(line)

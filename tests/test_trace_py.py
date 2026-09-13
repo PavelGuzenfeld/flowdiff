@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -84,6 +85,8 @@ def test_an_exception_leaves_a_raises_record(tmp_path: Path, lib, backend):
         with pytest.raises(ValueError):
             m.h("bad")
     recs = run(tmp_path, lib, ["lib.py:h"], action)
+    threads = [r.pop("thread") for r in recs]
+    assert threads == [threading.get_ident(), threading.get_ident()]
     assert recs == [{"seq": 1, "event": "enter", "frame": "lib.py:h", "args": {"x": "bad"}},
                     {"seq": 2, "event": "exit", "frame": "lib.py:h", "raises": "ValueError"}]
 
@@ -114,6 +117,64 @@ def test_context_is_recorded_on_every_event_while_set(tmp_path: Path, lib, backe
     assert [r.get("test") for r in recs] == [None, None, "tests/t.py::test_a", "tests/t.py::test_a", None, None]
 
 
+def test_a_frame_entered_from_a_spawned_thread_carries_that_threads_id(tmp_path: Path, lib, backend):
+    ids: list[int] = []
+
+    def call_from_thread():
+        ids.append(threading.get_ident())
+        lib.g(2)
+
+    def action(m):
+        m.g(1)
+        t = threading.Thread(target=call_from_thread)
+        t.start()
+        t.join()
+
+    recs = run(tmp_path, lib, ["lib.py:g"], action)
+    assert [r["thread"] for r in recs] == [threading.get_ident(), threading.get_ident(), ids[0], ids[0]]
+    assert ids[0] != threading.get_ident()
+
+
+def test_settrace_backend_stops_tracing_new_threads_once_the_run_ends(tmp_path: Path, lib, monkeypatch):
+    monkeypatch.delattr(sys, "monitoring")
+    run(tmp_path, lib, ["lib.py:g"], lambda m: m.g(1))
+    assert threading.gettrace() is None
+
+
+def test_settrace_backend_restores_a_threading_trace_hook_that_was_already_set(tmp_path: Path, lib, monkeypatch):
+    monkeypatch.delattr(sys, "monitoring")
+    previous = lambda frame, event, arg: None
+    threading.settrace(previous)
+    try:
+        run(tmp_path, lib, ["lib.py:g"], lambda m: m.g(1))
+        assert threading.gettrace() is previous
+    finally:
+        threading.settrace(None)
+
+
+def test_settrace_backend_still_traces_a_spawned_thread_with_a_prior_hook_installed(tmp_path: Path, lib, monkeypatch):
+    """Installing our own hook must not simply chain to whatever threading.settrace already held; a
+    caller's pre-existing hook must not suppress the spawned-thread record this run asked for."""
+    monkeypatch.delattr(sys, "monitoring")
+    threading.settrace(lambda frame, event, arg: None)
+    try:
+        ids: list[int] = []
+
+        def call_from_thread():
+            ids.append(threading.get_ident())
+            lib.g(2)
+
+        def action(m):
+            t = threading.Thread(target=call_from_thread)
+            t.start()
+            t.join()
+
+        recs = run(tmp_path, lib, ["lib.py:g"], action)
+        assert [r["thread"] for r in recs] == [ids[0], ids[0]]
+    finally:
+        threading.settrace(None)
+
+
 def test_varargs_and_keywords_are_named_with_their_stars(tmp_path: Path, lib, backend):
     recs = run(tmp_path, lib, ["lib.py:f"], lambda m: m.f(1, 2, 3, k="v"))
     assert recs[0]["args"] == {"x": 1, "*rest": [2, 3], "**opts": {"k": "v"}}
@@ -133,6 +194,23 @@ def test_settrace_fallback_restores_the_previous_trace_function(tmp_path: Path, 
 def test_monitoring_tool_is_released_after_the_run(tmp_path: Path, lib):
     run(tmp_path, lib, ["lib.py:g"], lambda m: m.g(1))
     assert sys.monitoring.get_tool(sys.monitoring.PROFILER_ID) is None
+
+
+def test_the_monitoring_backend_never_touches_the_threading_trace_hook(tmp_path: Path, lib):
+    """threading.settrace is a settrace-backend-only concern; sys.monitoring sees every thread on its
+    own; a monitoring run must leave whatever threading.settrace held (here, nothing) untouched."""
+    run(tmp_path, lib, ["lib.py:g"], lambda m: m.g(1))
+    assert threading.gettrace() is None
+
+
+def test_the_monitoring_backend_leaves_an_already_installed_threading_hook_exactly_as_it_was(tmp_path: Path, lib):
+    previous = lambda frame, event, arg: None
+    threading.settrace(previous)
+    try:
+        run(tmp_path, lib, ["lib.py:g"], lambda m: m.g(1))
+        assert threading.gettrace() is previous
+    finally:
+        threading.settrace(None)
 
 
 def test_frame_key_is_relative_to_the_tree_or_none(tmp_path: Path):
