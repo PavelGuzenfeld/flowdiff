@@ -112,6 +112,7 @@ def test_cpp_plan_prefers_the_literal_harness_and_builds_the_base_once(tmp_path:
     assert traces[0][4] == {"test_scale": "tests/test_lib.cpp::test_scale", "test_test_scale": "tests/test_lib.cpp::test_scale"}
     assert (out / "flow1.head.jsonl").read_text().startswith('{"seq": 1') and (out / "flow1.base.jsonl").exists()
     assert plan.trailer == ["linked: no device libraries (host build)"]
+    assert plan.mock is True and plan.device_libraries == []
     assert plan.delta() == ["  builddir/tests/test_lib  FAIL→PASS"]
 
 
@@ -151,6 +152,7 @@ def test_cpp_plan_stops_without_a_driver_or_with_a_device_library(tmp_path: Path
     plan = play.cpp_plan(ctr, FakeClient(tmp_path, {}, {}), flow, tmp_path, tmp_path / "b", tmp_path, 1, 9.0, 99.0)
     assert plan.stop == "linked: x (device build); these frames need the device: clamp, scale"
     assert plan.trailer == ["linked: x (device build)"]
+    assert plan.mock is False and plan.device_libraries == ["libcuda.so"]
     two_body, _ = flow_of(tmp_path, entry_name=None, tests=("tests/test_lib.cpp::t",), language="cpp")
     FakeCpp(monkeypatch, literal=["9"])
     plan = play.cpp_plan(ctr, FakeClient(tmp_path, {}, {}), two_body, tmp_path, tmp_path / "b", tmp_path, 1, 9.0, 99.0)
@@ -192,10 +194,71 @@ def test_run_drives_both_sides_prints_the_verdict_and_writes_the_index(repo: Pat
     assert captured.err == "warning: w0\nwarning: w1\n"
     index = json.loads((repo / ".flowdiff" / "run" / "index.json").read_text())
     assert index[0]["driver"] == "lib.py:scale" and index[0]["names"] == {"lib.py:scale": "scale", "lib.py:clamp": "clamp"}
+    assert (index[0]["mock"], index[0]["device_libraries"], index[0]["image"]) == (False, [], None)
     assert play.run(args_for(repo, "--fail-on-diff")) == 3
     same = written_plan(repo, ["lib.py:scale", "lib.py:clamp"], 8, 8)
     monkeypatch.setattr(play, "python_plan", lambda *a: same)
     assert play.run(args_for(repo, "--fail-on-diff")) == 0
+
+
+def test_run_fail_on_mock_exits_nothing_and_records_the_variant_in_the_index(repo: Path, monkeypatch, capsys):
+    flow, nodes = flow_of(repo)
+    ctr = container.Container("img", "/src", digest="sha256:x")
+    fake_analyse(monkeypatch, repo, [flow], ctr=ctr)
+    plan = written_plan(repo, ["lib.py:scale", "lib.py:clamp"], 8, 8, mock=True, device_libraries=[],
+                        trailer=["linked: no device libraries (host build)"])
+    monkeypatch.setattr(play, "python_plan", lambda *a: plan)
+    assert play.run(args_for(repo, "--fail-on-mock")) == cli.EXIT_NOTHING
+    captured = capsys.readouterr()
+    assert "linked: no device libraries (host build)" in captured.out
+    index = json.loads((repo / ".flowdiff" / "run" / "index.json").read_text())
+    assert (index[0]["mock"], index[0]["device_libraries"], index[0]["image"]) == (True, [], "img")
+    monkeypatch.setattr(play, "python_plan", lambda *a: plan)
+    assert play.run(args_for(repo)) == 0
+    device_plan = written_plan(repo, ["lib.py:scale", "lib.py:clamp"], 8, 8, mock=False, device_libraries=["libcuda.so"])
+    monkeypatch.setattr(play, "python_plan", lambda *a: device_plan)
+    assert play.run(args_for(repo, "--fail-on-mock")) == 0
+    index = json.loads((repo / ".flowdiff" / "run" / "index.json").read_text())
+    assert (index[0]["mock"], index[0]["device_libraries"]) == (False, ["libcuda.so"])
+
+
+def test_run_fail_on_mock_wins_over_fail_on_diff_on_a_diverging_mock_run(repo: Path, monkeypatch):
+    flow, nodes = flow_of(repo)
+    fake_analyse(monkeypatch, repo, [flow])
+    diverging_mock = written_plan(repo, ["lib.py:scale", "lib.py:clamp"], 8, 12, mock=True)
+    monkeypatch.setattr(play, "python_plan", lambda *a: diverging_mock)
+    assert play.run(args_for(repo, "--fail-on-mock", "--fail-on-diff")) == cli.EXIT_NOTHING
+    diverging_device = written_plan(repo, ["lib.py:scale", "lib.py:clamp"], 8, 12, mock=False)
+    monkeypatch.setattr(play, "python_plan", lambda *a: diverging_device)
+    assert play.run(args_for(repo, "--fail-on-mock", "--fail-on-diff")) == cli.EXIT_DIFF
+
+
+def test_run_fail_on_mock_trips_when_any_flow_is_mock_even_if_a_later_one_is_not(repo: Path, monkeypatch):
+    flow1, _ = flow_of(repo)
+    flow2, _ = flow_of(repo)
+    fake_analyse(monkeypatch, repo, [flow1, flow2])
+    plans = iter([written_plan(repo, ["lib.py:scale", "lib.py:clamp"], 8, 8, mock=True, device_libraries=[]),
+                 written_plan(repo, ["lib.py:scale", "lib.py:clamp"], 8, 8, mock=False, device_libraries=["libcuda.so"])])
+    monkeypatch.setattr(play, "python_plan", lambda *a: next(plans))
+    assert play.run(args_for(repo, "--fail-on-mock")) == cli.EXIT_NOTHING
+    index = json.loads((repo / ".flowdiff" / "run" / "index.json").read_text())
+    assert len(index) == 2
+    assert (index[0]["mock"], index[0]["device_libraries"]) == (True, [])
+    assert (index[1]["mock"], index[1]["device_libraries"]) == (False, ["libcuda.so"])
+
+
+def test_run_routes_cpp_flows_mock_status_into_the_exit_code_and_index(repo: Path, monkeypatch, capsys):
+    flow, nodes = flow_of(repo, tests=("tests/test_lib.cpp::t",), language="cpp")
+    ctr = container.Container("img", "/src")
+    fake_analyse(monkeypatch, repo, [flow], language="cpp", ctr=ctr)
+
+    def cpp_plan(c, client, f, root, base, out_dir, index, timeout, build_timeout, no_build=False):
+        return written_plan(root, ["lib.cpp:scale", "lib.cpp:clamp"], 8, 8, driver="lib.cpp:scale",
+                            mock=True, device_libraries=[], trailer=["linked: no device libraries (host build)"])
+    monkeypatch.setattr(play, "cpp_plan", cpp_plan)
+    assert play.run(args_for(repo, "--fail-on-mock")) == cli.EXIT_NOTHING
+    index = json.loads((repo / ".flowdiff" / "run" / "index.json").read_text())
+    assert (index[0]["mock"], index[0]["device_libraries"], index[0]["image"]) == (True, [], "img")
 
 
 def test_run_prints_the_note_for_test_driven_flows_with_an_entry(repo: Path, monkeypatch, capsys):

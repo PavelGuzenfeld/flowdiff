@@ -1,6 +1,6 @@
 """flowdiff [ref] renders the changed flows; play runs them on both revisions; show reads the recorded
-values. Exit 0 rendered or ran, 1 tool error, 2 nothing to show or no harness ran, 3 divergence under
---fail-on-diff."""
+values. Exit 0 rendered or ran, 1 tool error, 2 nothing to show, no harness ran, or a mock build under
+--fail-on-mock, 3 divergence under --fail-on-diff."""
 from __future__ import annotations
 
 import argparse
@@ -64,6 +64,8 @@ def build_play_parser() -> argparse.ArgumentParser:
     parser.add_argument("--depth", type=int, default=0, help="frames whose values are printed inline")
     parser.add_argument("--clean-base", action="store_true", help="recreate the .flowdiff/base worktree")
     parser.add_argument("--fail-on-diff", action="store_true", help=f"exit {EXIT_DIFF} when values diverge")
+    parser.add_argument("--fail-on-mock", action="store_true",
+                        help=f"exit {EXIT_NOTHING} when a C++ flow ran against the host build, not the device")
     parser.add_argument("--run-timeout", type=float, default=300.0, help="seconds per harness or test run")
     return parser
 

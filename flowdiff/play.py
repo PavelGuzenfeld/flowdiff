@@ -119,6 +119,9 @@ class Plan:
     drive: Callable[[str, Path], str | None] | None = None
     delta: Callable[[], list[str]] | None = None
     trailer: list[str] = field(default_factory=list)
+    # A host build stood in for the device (decisions 41, 42); Python has no equivalent today.
+    mock: bool = False
+    device_libraries: list[str] = field(default_factory=list)
 
 
 def python_plan(client: lsp.LspClient, g: graph.Graph, flow: graph.Flow, root: Path, base: Path, out_dir: Path,
@@ -227,6 +230,8 @@ def cpp_plan(ctr: container.Container, client: lsp.LspClient, flow: graph.Flow, 
     if head_exes:
         device, variant = harness_cpp.linked_variant(ctr, root, list(head_exes.values()))
         plan.trailer.append(variant)
+        plan.device_libraries = device
+        plan.mock = not device
         if device:
             plan.stop = f"{variant}; these frames need the device: {', '.join(sorted(f.name for f in flow.frames))}"
     return plan
@@ -267,6 +272,7 @@ def run(args: argparse.Namespace) -> int:
     out_dir = run_dir(root)
     index: list[dict] = []
     diverged = False
+    mocked = False
     for i, flow in enumerate(shown, 1):
         if id(flow) not in plans:
             print(render.render_flow(i, len(shown), flow, args.full, args.list_tests))
@@ -295,13 +301,16 @@ def run(args: argparse.Namespace) -> int:
         for line in plan.trailer:
             print(line)
         diverged = diverged or bool(report.differing())
+        mocked = mocked or plan.mock
         for frame in report.traced()[:args.depth]:
             print(compare.show(report, frame))
         if plan.delta is not None:
             print("\n".join(plan.delta()))
         names = {frame: node.qualified for frame, node in zip(plan.frames, [n for n in flow.frames if n.status != "slot"])}
         index.append({"flow": i, "frames": plan.frames, "base": str(traces["base"]), "head": str(traces["head"]),
-                      "driver": plan.driver, "names": names})
+                      "driver": plan.driver, "names": names, "mock": plan.mock,
+                      "device_libraries": plan.device_libraries,
+                      "image": analysis.container.image if analysis.container else None})
         if i < len(shown):
             print()
     removed = [f for f in analysis.flows if f.removed_only]
@@ -312,6 +321,8 @@ def run(args: argparse.Namespace) -> int:
     sys.stdout.flush()
     for w in analysis.warnings:
         print(f"warning: {w}", file=sys.stderr)
+    if mocked and args.fail_on_mock:
+        return cli.EXIT_NOTHING
     return cli.EXIT_DIFF if diverged and args.fail_on_diff else cli.EXIT_OK
 
 

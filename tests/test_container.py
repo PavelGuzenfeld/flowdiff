@@ -139,6 +139,7 @@ def test_detect_builds_the_layer_and_reads_the_workdir(tmp_path: Path, fake, mon
     monkeypatch.setattr(container.shutil, "which", lambda name: "/usr/bin/docker")
     c = container.detect(root, None)
     assert (c.image, c.workdir, c.compile_commands_dir) == ("flowdiff/proj:dev", "/src", "/src/builddir")
+    assert c.digest == "sha256:layer"
     fake.images["bare:dev"] = {"id": "sha256:b"}
     assert container.detect(root, "bare:dev").workdir == "/src"
     (root / "build" / "pkg").mkdir(parents=True)
