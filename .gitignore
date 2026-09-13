@@ -8,3 +8,4 @@ dist/
 *.bak
 .pytest_cache/
 .venv/
+.mutation-gate.toml
