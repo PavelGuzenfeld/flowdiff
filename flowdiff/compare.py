@@ -91,10 +91,17 @@ def is_marker(value: Any) -> bool:
     return isinstance(value, dict) and "type" in value and "fields" not in value
 
 
+def is_volatile(value: Any) -> bool:
+    """A marker for something the summariser knows varies by itself between runs: a timestamp, a uuid, an address."""
+    return isinstance(value, dict) and value.get("volatile") is True
+
+
 def pretty(value: Any) -> str:
     if value is MISSING:
         return "—"
     if is_marker(value):
+        if is_volatile(value):
+            return f"<{value['type']} volatile>"
         digest = f"#{value['sha256'][:8]}" if "sha256" in value else ""
         if "shape" in value:
             return f"{value['type']}{value['shape']} {value.get('dtype', '')}{digest}".rstrip()
@@ -150,8 +157,8 @@ class Report:
     # Added and removed frames: calls on one side only are what the marker already says, not a divergence.
     one_sided: set[str] = field(default_factory=set)
 
-    def divergences(self, frame: str) -> list[Divergence]:
-        """Timed by the head trace where the call exists there, so the origin is the first value that differed."""
+    def _leaf_divergences(self, frame: str) -> list[Divergence]:
+        """Every differing leaf for a frame, volatile ones included; divergences()/volatile() split by is_volatile."""
         base, head = self.base.get(frame, []), self.head.get(frame, [])
         out = []
         for i in range(max(len(base), len(head))):
@@ -168,6 +175,14 @@ class Report:
                     out += [Divergence(frame, i, path, lb, lh, head[i].observed_at(key))
                             for path, lb, lh in leaves(b.get(key, MISSING), h.get(key, MISSING), key)]
         return out
+
+    def divergences(self, frame: str) -> list[Divergence]:
+        """Timed by the head trace where the call exists there, so the origin is the first value that differed."""
+        return [d for d in self._leaf_divergences(frame) if not is_volatile(d.base) and not is_volatile(d.head)]
+
+    def volatile(self, frame: str) -> list[Divergence]:
+        """Leaves divergences() drops because one side is a marker for something known to vary on its own."""
+        return [d for d in self._leaf_divergences(frame) if is_volatile(d.base) or is_volatile(d.head)]
 
     def changed_paths(self, frame: str, limit: int = 3) -> str:
         paths: list[str] = []
@@ -189,17 +204,33 @@ class Report:
         return min(found, key=lambda d: d.at) if found else None
 
 
+def volatility_note(report: Report) -> str:
+    """Names leaves divergences() excluded as volatile, deduped, so a quiet verdict is not mistaken for untouched."""
+    excluded: list[tuple[str, str]] = []
+    for f in report.traced():
+        for d in report.volatile(f):
+            pair = (f, d.field)
+            if pair not in excluded:
+                excluded.append(pair)
+    if not excluded:
+        return ""
+    shown = ", ".join(f"{short(f)}.{path}" for f, path in excluded[:3])
+    more = f", +{len(excluded) - 3} more" if len(excluded) > 3 else ""
+    return f"; excluded as volatile: {shown}{more}"
+
+
 def verdict(report: Report) -> str:
     traced = report.traced()
     if not traced:
         return "no flow frame was reached: the harness ran but traced nothing"
     differing = report.differing()
+    note = volatility_note(report)
     if not differing:
-        return f"identical: {len(traced)} frames traced, no value differs"
+        return f"identical: {len(traced)} frames traced, no value differs{note}"
     origin = report.origin()
     assert origin is not None
     where = "; ".join(f"{short(f)} ({report.changed_paths(f)})" for f in differing)
-    return f"{len(differing)} of {len(traced)} frames differ: {where}; origin {short(origin.frame)}"
+    return f"{len(differing)} of {len(traced)} frames differ: {where}; origin {short(origin.frame)}{note}"
 
 
 def short(frame: str) -> str:
@@ -212,17 +243,21 @@ def resolve(report: Report, query: str) -> list[str]:
     return [f for f in report.frames if query in (f, short(f), short(f).rsplit("::", 1)[-1])]
 
 
-def call_rows(b: dict[str, Any], h: dict[str, Any], path: str | None) -> list[tuple[str, str, str]]:
-    """Differing leaves of one call, or every leaf under `path` printed whole when a path is asked for."""
+def call_rows(b: dict[str, Any], h: dict[str, Any], path: str | None) -> list[tuple[str, str, str, bool]]:
+    """Differing leaves of one call, or every leaf under `path` printed whole when a path is asked for.
+
+    The fourth element marks a leaf volatile: one side's value is known to vary on its own between runs.
+    """
     keys = [k for k in b if k not in ("return", "raises")] + [k for k in h if k not in b and k not in ("return", "raises")]
     keys += [k for k in ("raises", "return") if k in b or k in h]
     rows = []
     for key in keys:
         if path is None:
-            rows += [(p, value_text(lb), value_text(lh)) for p, lb, lh in leaves(b.get(key, MISSING), h.get(key, MISSING), key)]
+            rows += [(p, value_text(lb), value_text(lh), is_volatile(lb) or is_volatile(lh))
+                     for p, lb, lh in leaves(b.get(key, MISSING), h.get(key, MISSING), key)]
         elif path == key or path.startswith(key + ".") or path.startswith(key + "["):
             bv, hv = descend(b.get(key, MISSING), path[len(key):]), descend(h.get(key, MISSING), path[len(key):])
-            rows.append((path, pretty(bv), pretty(hv)))
+            rows.append((path, pretty(bv), pretty(hv), is_volatile(bv) or is_volatile(hv)))
     return rows
 
 
@@ -270,9 +305,10 @@ def tests_of(report: Report, frame: str, indices: list[int]) -> str:
     return "  ← " + shown + (f", +{len(names) - MAX_TESTS_IN_LABEL} more" if len(names) > MAX_TESTS_IN_LABEL else "")
 
 
-def table(rows: list[tuple[str, str, str]]) -> list[str]:
+def table(rows: list[tuple[str, str, str, bool]]) -> list[str]:
     width = min(max(len(r[0]) for r in rows), PATH_COLUMN)
-    return [f"    {p:<{width}}  {bv}  →  {hv}" for p, bv, hv in rows]
+    return [f"    {p:<{width}}  {bv}  →  {hv}" + ("  (volatile)" if volatile else "")
+            for p, bv, hv, volatile in rows]
 
 
 def show(report: Report, frame: str, path: str | None = None) -> str:
@@ -314,7 +350,13 @@ def show_call(report: Report, frame: str, index: int, path: str | None = None) -
         hl = dict(flatten(descend(h.get(key, MISSING), rest), path or key))
         for leaf in list(hl) + [p for p in bl if p not in hl]:
             bv, hv = bl.get(leaf, MISSING), hl.get(leaf, MISSING)
-            rows.append((leaf, pretty(bv) if bv == hv else f"{pretty(bv)}  →  {pretty(hv)}   *"))
+            if bv == hv:
+                text = pretty(bv)
+            elif is_volatile(bv) or is_volatile(hv):
+                text = f"{pretty(bv)}  →  {pretty(hv)}   (volatile)"
+            else:
+                text = f"{pretty(bv)}  →  {pretty(hv)}   *"
+            rows.append((leaf, text))
     lines = [f"{frame}  call #{index + 1}{tests_of(report, frame, [index])}"]
     if not rows:
         return "\n".join(lines + [f"    {path}: not an argument of this call"])
