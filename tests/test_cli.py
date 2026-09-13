@@ -38,6 +38,11 @@ def test_play_parser_defaults():
     args = cli.build_play_parser().parse_args([])
     assert (args.depth, args.clean_base, args.fail_on_diff, args.run_timeout) == (0, False, False, 300.0)
     assert (args.ref, args.hops, args.no_tests) == (None, 3, False)
+    assert args.fail_on_mock is False
+
+
+def test_play_parser_accepts_fail_on_mock():
+    assert cli.build_play_parser().parse_args(["--fail-on-mock"]).fail_on_mock is True
 
 
 def test_missing_tool_is_exit_1(monkeypatch, capsys, repo: Path):

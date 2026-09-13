@@ -164,6 +164,8 @@ class Container:
     db_dir: str = ""
     # colcon packages holding the changed files; the build stops at them (--packages-up-to) when set.
     packages: tuple[str, ...] = ()
+    # The layered image's own content id: the tag is reused across rebuilds, this is not (decision 49).
+    digest: str = ""
 
     @property
     def compile_commands_dir(self) -> str:
@@ -216,7 +218,7 @@ def detect(root: Path, explicit: str | None) -> Container | None:
     mount = (mount_point(root, db, entries_of(db)) if db is not None else None) \
         or image_field(base, "{{.Config.WorkingDir}}") or "/src"
     db_dir = db_dir_of(root, db, mount) if db is not None else f"{mount}/{BUILD_DIR}"
-    return Container(image, mount, db_dir)
+    return Container(image, mount, db_dir, digest=image_field(image, "{{.Id}}"))
 
 
 def find_compile_db(root: Path) -> Path | None:
