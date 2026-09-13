@@ -9,9 +9,14 @@ import json
 import os
 from typing import Any, Optional
 
-from .trace_py import Tracer
+from .trace_py import Tracer, maybe_freeze
 
 _tracer: Optional[Tracer] = None
+
+
+def pytest_configure(config: Any) -> None:
+    # Before conftest.py/test-module imports, so a stashed "from time import time" gets the frozen one.
+    maybe_freeze()
 
 
 def pytest_sessionstart(session: Any) -> None:

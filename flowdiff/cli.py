@@ -90,6 +90,9 @@ def build_play_parser() -> argparse.ArgumentParser:
     parser.add_argument("--float-rtol", type=float, help="relative budget (of the larger magnitude) for a float leaf")
     parser.add_argument("--dry-run", action="store_true",
                         help="print the build, harness and gdb or pytest commands each side would run; run nothing")
+    parser.add_argument("--freeze", action="store_true",
+                        help="pin time.time() and seed random in the traced Python process so both sides run at "
+                             "the same instant; changes what the flow does, so it's opt-in. Durations are not pinned")
     return parser
 
 

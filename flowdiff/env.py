@@ -23,8 +23,8 @@ def python_interpreter(root: Path) -> Path:
     return Path(sys.executable)
 
 
-def harness_env(tree: Path, side: str = "", trace_out: Path | None = None,
-                frames: list[str] | None = None) -> dict[str, str]:
+def harness_env(tree: Path, side: str = "", trace_out: Path | None = None, frames: list[str] | None = None,
+                freeze: bool = False) -> dict[str, str]:
     env = dict(os.environ)
     path = [str(tree)] + ([str(TOOL_ROOT)] if trace_out is not None else [])
     if env.get("PYTHONPATH"):
@@ -40,4 +40,6 @@ def harness_env(tree: Path, side: str = "", trace_out: Path | None = None,
         env["FLOWDIFF_OUT"] = str(trace_out)
         env["FLOWDIFF_SCRATCH"] = str(trace_out.parent.parent)
         env["FLOWDIFF_FRAMES"] = json.dumps(frames or [])
+        if freeze:
+            env["FLOWDIFF_FREEZE"] = "1"
     return env

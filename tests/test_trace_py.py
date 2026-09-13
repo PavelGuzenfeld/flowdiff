@@ -1,7 +1,9 @@
 import importlib.util
 import json
+import random
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -218,6 +220,61 @@ def test_frame_key_is_relative_to_the_tree_or_none(tmp_path: Path):
     assert trace_py.frame_key(tree, str(tmp_path / "pkg" / "m.py"), "f") == "pkg/m.py:f"
     assert trace_py.frame_key(tree, "/elsewhere/m.py", "f") is None
     assert trace_py.frame_key(tree, str(tmp_path) + "x/m.py", "f") is None
+
+
+def test_maybe_freeze_is_a_noop_without_the_env_var(monkeypatch):
+    monkeypatch.delenv("FLOWDIFF_FREEZE", raising=False)
+    real_time = time.time
+    state_before = random.getstate()
+    trace_py.maybe_freeze()
+    assert time.time is real_time
+    assert random.getstate() == state_before
+
+
+def test_maybe_freeze_pins_time_to_the_frozen_epoch_on_every_call(monkeypatch):
+    monkeypatch.setenv("FLOWDIFF_FREEZE", "1")
+    monkeypatch.setattr(time, "time", time.time)
+    trace_py.maybe_freeze()
+    first = time.time()
+    assert first == 1700000000.0
+    assert time.time() == first
+
+
+def test_maybe_freeze_leaves_monotonic_untouched(monkeypatch):
+    monkeypatch.setenv("FLOWDIFF_FREEZE", "1")
+    monkeypatch.setattr(time, "time", time.time)
+    real_monotonic = time.monotonic
+    trace_py.maybe_freeze()
+    assert time.monotonic is real_monotonic
+
+
+def test_maybe_freeze_seeds_random_to_a_fixed_state(monkeypatch):
+    monkeypatch.setenv("FLOWDIFF_FREEZE", "1")
+    monkeypatch.setattr(time, "time", time.time)
+    random.seed(0)
+    expected = random.random()
+    try:
+        trace_py.maybe_freeze()
+        assert random.random() == expected
+    finally:
+        random.seed()
+
+
+def test_maybe_freeze_is_idempotent_across_repeated_calls(monkeypatch):
+    monkeypatch.setenv("FLOWDIFF_FREEZE", "1")
+    monkeypatch.setattr(time, "time", time.time)
+    trace_py.maybe_freeze()
+    trace_py.maybe_freeze()
+    assert time.time() == 1700000000.0
+    trace_py.maybe_freeze()
+    random.seed(0)
+    expected = random.random()
+    try:
+        trace_py.maybe_freeze()
+        trace_py.maybe_freeze()
+        assert random.random() == expected
+    finally:
+        random.seed()
 
 
 def test_unserialisable_values_fall_back_to_repr(tmp_path: Path, lib, backend):

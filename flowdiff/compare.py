@@ -176,6 +176,8 @@ class Report:
     # Opt-in numeric budget (decisions on floats): unset means exact, as everywhere else.
     float_tol: float | None = None
     float_rtol: float | None = None
+    # Opt-in harness determinism (--freeze): named here so the verdict says it applied, like every other variant.
+    frozen: bool = False
 
     def _leaf_divergences(self, frame: str) -> list[Divergence]:
         """Every differing leaf for a frame, volatile ones included; divergences()/volatile() split by is_volatile.
@@ -263,11 +265,15 @@ def tolerance_note(report: Report) -> str:
     return f"  (float tolerance {', '.join(parts)})"
 
 
+def frozen_note(report: Report) -> str:
+    return "  (time frozen, random seeded)" if report.frozen else ""
+
+
 def verdict(report: Report) -> str:
     traced = report.traced()
     if not traced:
         return "no flow frame was reached: the harness ran but traced nothing"
-    note = tolerance_note(report) + volatility_note(report)
+    note = tolerance_note(report) + volatility_note(report) + frozen_note(report)
     differing = report.differing()
     if not differing:
         return f"identical: {len(traced)} frames traced, no value differs{note}"

@@ -26,11 +26,12 @@ def harness_command(interpreter: Path, harness: Path) -> list[str]:
     return [str(interpreter), str(harness)]
 
 
-def run_harness(interpreter: Path, harness: Path, tree: Path, side: str, out: Path, timeout: float) -> str | None:
+def run_harness(interpreter: Path, harness: Path, tree: Path, side: str, out: Path, timeout: float,
+                freeze: bool = False) -> str | None:
     out.unlink(missing_ok=True)
     try:
         proc = subprocess.run(harness_command(interpreter, harness), cwd=tree, capture_output=True, text=True,
-                              timeout=timeout, env=env.harness_env(tree, side, out))
+                              timeout=timeout, env=env.harness_env(tree, side, out, freeze=freeze))
     except subprocess.TimeoutExpired:
         return f"{side}: harness timed out after {timeout:.0f}s"
     if proc.returncode != 0:
@@ -70,14 +71,14 @@ def traced_tests_command(interpreter: Path, tree: Path, tests: list[str], out: P
 
 
 def run_traced_tests(interpreter: Path, tree: Path, tests: list[str], frames: list[str], side: str, out: Path,
-                     timeout: float) -> str | None:
+                     timeout: float, freeze: bool = False) -> str | None:
     out.unlink(missing_ok=True)
     cmd = traced_tests_command(interpreter, tree, tests, out)
     if cmd is None:
         return f"{side}: none of the covering tests exist on this side"
     try:
         proc = subprocess.run(cmd, cwd=tree, capture_output=True, text=True, timeout=timeout,
-                              env=env.harness_env(tree, side, out, frames))
+                              env=env.harness_env(tree, side, out, frames, freeze=freeze))
     except subprocess.TimeoutExpired:
         return f"{side}: covering tests timed out after {timeout:.0f}s"
     # 0 passed and 1 failed both traced the flow; anything else never ran it.
@@ -136,7 +137,7 @@ class Plan:
 
 
 def python_plan(client: lsp.LspClient, g: graph.Graph, flow: graph.Flow, root: Path, base: Path, out_dir: Path,
-                index: int, timeout: float) -> Plan:
+                index: int, timeout: float, freeze: bool = False) -> Plan:
     harness = harness_py.build(client, root, base, flow, g)
     harness_path = out_dir / f"flow{index}.py"
     harness_path.write_text(harness.source)
@@ -146,7 +147,8 @@ def python_plan(client: lsp.LspClient, g: graph.Graph, flow: graph.Flow, root: P
     plan = Plan(frames, warnings=list(harness.warnings), driver=harness.driver)
     shared, changed_tests = shared_tests(base, root, flow.tests) if flow.tests else ([], [])
     if harness.complete:
-        plan.drive = lambda side, tree: run_harness(interpreter, harness_path, tree, side, traces[side], timeout)
+        plan.drive = lambda side, tree: run_harness(interpreter, harness_path, tree, side, traces[side], timeout,
+                                                     freeze)
         plan.plan_lines = lambda: [f"{side}: cwd={tree}  {' '.join(harness_command(interpreter, harness_path))}"
                                    for side, tree in (("base", base), ("head", root))]
     elif shared:
@@ -154,7 +156,8 @@ def python_plan(client: lsp.LspClient, g: graph.Graph, flow: graph.Flow, root: P
         if changed_tests:
             plan.warnings.append(f"the driving tests changed in this diff ({', '.join(changed_tests)}); "
                                  "a divergence may reflect the inputs rather than the code")
-        plan.drive = lambda side, tree: run_traced_tests(interpreter, tree, shared, frames, side, traces[side], timeout)
+        plan.drive = lambda side, tree: run_traced_tests(interpreter, tree, shared, frames, side, traces[side],
+                                                          timeout, freeze)
         plan.plan_lines = lambda: [
             f"{side}: cwd={tree}  {' '.join(cmd)}" if (cmd := traced_tests_command(interpreter, tree, shared, traces[side])) is not None
             else f"{side}: none of the covering tests exist on this side"
@@ -302,7 +305,8 @@ def run(args: argparse.Namespace) -> int:
                 continue
             index = len(plans) + 1
             if client.config.language_id == "python":
-                plans[id(flow)] = python_plan(client, g, flow, root, base_holder[0], out_dir, index, args.run_timeout)
+                plans[id(flow)] = python_plan(client, g, flow, root, base_holder[0], out_dir, index,
+                                              args.run_timeout, args.freeze)
             elif analysis.container is not None:
                 plans[id(flow)] = cpp_plan(analysis.container, client, flow, root, base_holder[0], out_dir, index,
                                            args.run_timeout, args.build_timeout, args.no_build, args.dry_run)
@@ -351,7 +355,7 @@ def run(args: argparse.Namespace) -> int:
         one_sided = {f for f, node in zip(plan.frames, [n for n in flow.frames if n.status != "slot"])
                      if node.status in ("added", "removed")}
         report = compare.Report(plan.frames, compare.load(traces["base"]), compare.load(traces["head"]), one_sided,
-                                args.float_tol, args.float_rtol)
+                                args.float_tol, args.float_rtol, args.freeze)
         analysis.warnings += compare.thread_warnings(report)
         print(compare.verdict(report))
         for line in plan.trailer:

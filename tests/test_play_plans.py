@@ -37,8 +37,42 @@ def test_python_plan_uses_the_harness_when_it_is_complete(tmp_path: Path, monkey
     assert plan.frames == ["lib.py:scale", "lib.py:clamp"] and plan.driver == "lib.py:scale" and plan.warnings == ["w1"]
     assert plan.note is None and plan.stop is None
     assert plan.drive("base", tmp_path / "base") is None
-    assert seen["harness"] == (Path("/py"), out / "flow1.py", tmp_path / "base", "base", out / "flow1.base.jsonl", 9.0)
+    assert seen["harness"] == (Path("/py"), out / "flow1.py", tmp_path / "base", "base", out / "flow1.base.jsonl", 9.0,
+                               False)
     assert plan.delta() == ["  d"]
+
+
+def test_python_plan_threads_freeze_into_run_harness_and_run_traced_tests(tmp_path: Path, monkeypatch):
+    flow, nodes = flow_of(tmp_path)
+    (tmp_path / "lib.py").write_text("")
+    monkeypatch.setattr(harness_py, "build", lambda *a: harness_py.Harness("SRC", True, (), "lib.py:scale"))
+    monkeypatch.setattr(play.env, "python_interpreter", lambda root: Path("/py"))
+    seen = {}
+
+    def spy_harness(*a):
+        seen["harness"] = a
+    monkeypatch.setattr(play, "run_harness", spy_harness)
+    out = tmp_path / "run"
+    out.mkdir()
+    complete = play.python_plan(FakeClient(tmp_path, {}, {}), graph.Graph(), flow, tmp_path, tmp_path / "base",
+                                out, 1, 9.0, True)
+    complete.drive("base", tmp_path / "base")
+    assert seen["harness"][-1] is True
+
+    def spy_traced(*a):
+        seen["traced"] = a
+    monkeypatch.setattr(harness_py, "build", lambda *a: harness_py.Harness("SRC", False))
+    monkeypatch.setattr(play, "shared_tests", lambda base, root, tests: (["tests/test_lib.py::test_scale"], []))
+    monkeypatch.setattr(play, "run_traced_tests", spy_traced)
+    shared = play.python_plan(FakeClient(tmp_path, {}, {}), graph.Graph(), flow, tmp_path, tmp_path / "base",
+                              out, 2, 9.0, True)
+    shared.drive("head", tmp_path)
+    assert seen["traced"][-1] is True
+
+    default = play.python_plan(FakeClient(tmp_path, {}, {}), graph.Graph(), flow, tmp_path, tmp_path / "base",
+                               out, 3, 9.0)
+    default.drive("head", tmp_path)
+    assert seen["traced"][-1] is False
 
 
 def test_python_plan_dry_run_names_the_harness_command_without_running_it(tmp_path: Path, monkeypatch):
@@ -501,6 +535,25 @@ def test_run_depth_still_shows_a_frame_the_tolerance_forgave(repo: Path, monkeyp
     assert play.run(args_for(repo, "--depth", "1", "--float-tol", "1e-9")) == 0
     assert "lib.py:scale  base 1 call(s), head 1 call(s)\n  calls #1\n    return  1.0  →  1.0000000005\n" \
         in capsys.readouterr().out
+
+
+def test_run_passes_freeze_to_python_plan_and_names_it_in_the_verdict(repo: Path, monkeypatch, capsys):
+    flow, nodes = flow_of(repo)
+    fake_analyse(monkeypatch, repo, [flow])
+    plan = written_plan(repo, ["lib.py:scale", "lib.py:clamp"], 8, 8, driver="lib.py:scale")
+    seen = {}
+
+    def spy(*a):
+        seen["args"] = a
+        return plan
+    monkeypatch.setattr(play, "python_plan", spy)
+    assert play.run(args_for(repo, "--freeze")) == 0
+    assert seen["args"][-1] is True
+    assert "identical: 1 frames traced, no value differs  (time frozen, random seeded)" in capsys.readouterr().out
+    monkeypatch.setattr(play, "python_plan", spy)
+    assert play.run(args_for(repo)) == 0
+    assert seen["args"][-1] is False
+    assert "(time frozen, random seeded)" not in capsys.readouterr().out
 
 
 def test_run_dry_run_prints_plan_lines_and_never_drives_or_writes_the_index(repo: Path, monkeypatch, capsys):

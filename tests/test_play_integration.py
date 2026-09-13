@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from flowdiff import cli
+from flowdiff import cli, compare
 
 from conftest import git
 from test_cli_integration import BEFORE, project  # noqa: F401  (fixture)
@@ -107,6 +107,38 @@ def test_an_extracted_helper_is_a_new_frame_not_a_divergence(played: Path, capsy
     assert "double+" in out and "identical: 3 frames traced, no value differs" in out
     assert cli.main(["show", "double", "--repo", str(played)]) == 0
     assert capsys.readouterr().out.startswith("lib.py:double  base 0 call(s), head 1 call(s)")
+
+
+def test_play_freeze_pins_a_wall_clock_return_value_through_the_real_harness(project: Path, capsys):
+    """Real end-to-end proof that the raw (non-pytest) harness path freezes: not just that maybe_freeze() is
+    called before the import in the generated source, but that running it actually pins the value.
+
+    STAMP is a module-level snapshot, computed once at import time. A call-time time.time() would pass even
+    if maybe_freeze() ran after `import lib` (as long as it ran before the harness calls scale()); only a
+    value captured during the import itself proves the ordering the template relies on.
+
+    int() rather than a bare float: a float this close to "now" is marked volatile by summarise() and its
+    exact value discarded, which would make the frozen value unrecoverable from the recorded trace.
+    """
+    (project / "tests").mkdir()
+    (project / "tests" / "test_lib.py").write_text(TEST_WITH_LITERAL)
+    git(project, "add", "tests")
+    git(project, "commit", "-q", "-m", "add test")
+    stamped = BEFORE.replace("def clamp(value, ceiling):",
+                             "import time\nSTAMP = int(time.time())\n\n\ndef clamp(value, ceiling):")
+    stamped = stamped.replace("def scale(value):\n    return clamp(value, 100) * 2",
+                              "def scale(value):\n    return STAMP")
+    (project / "lib.py").write_text(stamped)
+    git(project, "add", "lib.py")
+    git(project, "commit", "-q", "-m", "scale returns a module-level import-time stamp")
+    (project / "lib.py").write_text(stamped.replace("return STAMP", "value = value\n    return STAMP"))
+    assert cli.main(["play", "--repo", str(project), "--no-tests", "--freeze"]) == 0
+    assert "identical: 1 frames traced, no value differs  (time frozen, random seeded)" in capsys.readouterr().out
+    report = compare.Report(["lib.py:scale"], compare.load(project / ".flowdiff" / "run" / "flow1.base.jsonl"),
+                            compare.load(project / ".flowdiff" / "run" / "flow1.head.jsonl"))
+    calls = report.base["lib.py:scale"]
+    assert calls and calls[0].result == 1700000000
+    assert report.head["lib.py:scale"][0].result == 1700000000
 
 
 def test_play_identical_behaviour_says_so(played: Path, capsys):
