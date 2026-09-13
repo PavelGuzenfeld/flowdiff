@@ -39,10 +39,16 @@ def test_play_parser_defaults():
     assert (args.depth, args.clean_base, args.fail_on_diff, args.run_timeout) == (0, False, False, 300.0)
     assert (args.ref, args.hops, args.no_tests) == (None, 3, False)
     assert args.fail_on_mock is False
+    assert (args.float_tol, args.float_rtol) == (None, None)
 
 
 def test_play_parser_accepts_fail_on_mock():
     assert cli.build_play_parser().parse_args(["--fail-on-mock"]).fail_on_mock is True
+
+
+def test_play_parser_accepts_a_float_tolerance():
+    args = cli.build_play_parser().parse_args(["--float-tol", "1e-9", "--float-rtol", "0.001"])
+    assert (args.float_tol, args.float_rtol) == (1e-9, 0.001)
 
 
 def test_missing_tool_is_exit_1(monkeypatch, capsys, repo: Path):

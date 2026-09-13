@@ -259,6 +259,38 @@ def test_run_routes_cpp_flows_mock_status_into_the_exit_code_and_index(repo: Pat
     assert play.run(args_for(repo, "--fail-on-mock")) == cli.EXIT_NOTHING
     index = json.loads((repo / ".flowdiff" / "run" / "index.json").read_text())
     assert (index[0]["mock"], index[0]["device_libraries"], index[0]["image"]) == (True, [], "img")
+def test_run_forgives_a_float_return_within_the_cli_tolerance(repo: Path, monkeypatch, capsys):
+    flow, nodes = flow_of(repo)
+    fake_analyse(monkeypatch, repo, [flow])
+    plan = written_plan(repo, ["lib.py:scale", "lib.py:clamp"], 1.0, 1.0000000005, driver="lib.py:scale")
+    monkeypatch.setattr(play, "python_plan", lambda *a: plan)
+    assert play.run(args_for(repo, "--float-tol", "1e-9")) == 0
+    assert "identical: 1 frames traced, no value differs  (float tolerance abs=1e-09)" in capsys.readouterr().out
+    monkeypatch.setattr(play, "python_plan", lambda *a: plan)
+    assert play.run(args_for(repo, "--fail-on-diff", "--float-tol", "1e-9")) == 0
+    monkeypatch.setattr(play, "python_plan", lambda *a: plan)
+    assert play.run(args_for(repo, "--fail-on-diff")) == 3
+
+
+def test_run_forgives_a_float_return_within_the_cli_relative_tolerance(repo: Path, monkeypatch, capsys):
+    flow, nodes = flow_of(repo)
+    fake_analyse(monkeypatch, repo, [flow])
+    plan = written_plan(repo, ["lib.py:scale", "lib.py:clamp"], 1000.0, 1005.0, driver="lib.py:scale")
+    monkeypatch.setattr(play, "python_plan", lambda *a: plan)
+    assert play.run(args_for(repo, "--fail-on-diff", "--float-rtol", "0.01")) == 0
+    assert "identical: 1 frames traced, no value differs  (float tolerance rel=0.01)" in capsys.readouterr().out
+    monkeypatch.setattr(play, "python_plan", lambda *a: plan)
+    assert play.run(args_for(repo, "--fail-on-diff")) == 3
+
+
+def test_run_depth_still_shows_a_frame_the_tolerance_forgave(repo: Path, monkeypatch, capsys):
+    flow, nodes = flow_of(repo)
+    fake_analyse(monkeypatch, repo, [flow])
+    plan = written_plan(repo, ["lib.py:scale", "lib.py:clamp"], 1.0, 1.0000000005, driver="lib.py:scale")
+    monkeypatch.setattr(play, "python_plan", lambda *a: plan)
+    assert play.run(args_for(repo, "--depth", "1", "--float-tol", "1e-9")) == 0
+    assert "lib.py:scale  base 1 call(s), head 1 call(s)\n  calls #1\n    return  1.0  →  1.0000000005\n" \
+        in capsys.readouterr().out
 
 
 def test_run_prints_the_note_for_test_driven_flows_with_an_entry(repo: Path, monkeypatch, capsys):

@@ -67,6 +67,8 @@ def build_play_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fail-on-mock", action="store_true",
                         help=f"exit {EXIT_NOTHING} when a C++ flow ran against the host build, not the device")
     parser.add_argument("--run-timeout", type=float, default=300.0, help="seconds per harness or test run")
+    parser.add_argument("--float-tol", type=float, help="absolute budget a float leaf may drift by and still count as identical")
+    parser.add_argument("--float-rtol", type=float, help="relative budget (of the larger magnitude) for a float leaf")
     return parser
 
 
