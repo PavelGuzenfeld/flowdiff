@@ -1,5 +1,7 @@
+import datetime
 import importlib
 import math
+import uuid
 from pathlib import Path
 
 import pytest
@@ -65,7 +67,7 @@ def test_inline_limit_boundaries_for_bytes_dicts_and_fields():
     wide.__dict__ = {f"f{i}": i for i in range(64)}
     assert summarise.summarise(wide)["fields"] == {f"f{i}": i for i in range(64)}
     wide.__dict__["f64"] = 64
-    assert summarise.summarise(wide) == {"type": "test_summarise.Plain"}
+    assert summarise.summarise(wide) == {"type": "test_summarise.Plain", "volatile": True}
 
 
 def test_depth_counts_through_dicts_and_object_fields_alike():
@@ -88,15 +90,85 @@ def test_an_object_with_only_a_shape_attribute_is_not_an_array():
         shape = (1,)
 
     out = summarise.summarise(Shaped())
-    assert out["type"].endswith("Shaped") and "shape" not in out and "sha256" not in out
+    assert out["type"].endswith("Shaped") and "fields" in out
+    assert "shape" not in out and "sha256" not in out and "volatile" not in out
 
 
 def test_scalars_are_recorded_verbatim():
     assert [summarise.summarise(v) for v in (None, True, 7, 2.5, "hi")] == [None, True, 7, 2.5, "hi"]
 
 
+def test_an_int_at_the_current_epoch_second_is_not_a_wall_clock_candidate(monkeypatch):
+    monkeypatch.setattr(summarise.time, "time", lambda: 2000.0)
+    assert summarise.summarise(2000) == 2000
+
+
 def test_non_finite_floats_become_their_repr():
     assert summarise.summarise(math.inf) == "inf" and summarise.summarise(math.nan) == "nan"
+
+
+def test_a_float_within_the_wall_clock_window_is_marked_volatile(monkeypatch):
+    monkeypatch.setattr(summarise.time, "time", lambda: 2000.0)
+    assert summarise.summarise(2000.0) == {"type": "float", "volatile": True}
+    assert summarise.summarise(1999.5) == {"type": "float", "volatile": True}
+
+
+def test_the_wall_clock_window_is_exactly_one_second_and_the_boundary_is_exclusive(monkeypatch):
+    monkeypatch.setattr(summarise.time, "time", lambda: 2000.0)
+    assert summarise.WALL_CLOCK_WINDOW == 1.0
+    assert summarise.summarise(1999.0) == 1999.0
+    assert summarise.summarise(1999.0 + 1e-9) == {"type": "float", "volatile": True}
+    assert summarise.summarise(1998.5) == 1998.5
+
+
+def test_the_wall_clock_window_is_bounded_on_both_sides_of_now(monkeypatch):
+    monkeypatch.setattr(summarise.time, "time", lambda: 2000.0)
+    assert summarise.summarise(2000.5) == {"type": "float", "volatile": True}
+    assert summarise.summarise(2001.5) == 2001.5
+
+
+def test_the_wall_clock_window_upper_boundary_mirrors_the_lower_one(monkeypatch):
+    monkeypatch.setattr(summarise.time, "time", lambda: 2000.0)
+    assert summarise.summarise(2001.0) == 2001.0
+    assert summarise.summarise(2001.0 - 1e-9) == {"type": "float", "volatile": True}
+
+
+def test_datetime_date_and_time_values_are_marked_volatile():
+    assert summarise.summarise(datetime.datetime(2020, 1, 1)) == {"type": "datetime.datetime", "volatile": True}
+    assert summarise.summarise(datetime.date(2020, 1, 1)) == {"type": "datetime.date", "volatile": True}
+    assert summarise.summarise(datetime.time(1, 2)) == {"type": "datetime.time", "volatile": True}
+
+
+def test_uuids_are_marked_volatile():
+    assert summarise.summarise(uuid.uuid4()) == {"type": "uuid.UUID", "volatile": True}
+    assert summarise.summarise(uuid.UUID(int=0)) == {"type": "uuid.UUID", "volatile": True}
+
+
+def test_a_custom_repr_without_an_address_is_not_marked_volatile():
+    class Handle:
+        __slots__ = ()
+
+        def __repr__(self):
+            return "Handle(open)"
+
+    out = summarise.summarise(Handle())
+    assert out == {"type": summarise.type_name(Handle())} and "volatile" not in out
+
+
+def test_has_address_repr_survives_a_raising_repr():
+    class Broken:
+        def __repr__(self):
+            raise RuntimeError("no repr for you")
+
+    assert summarise.has_address_repr(Broken()) is False
+
+
+def test_has_address_repr_detects_the_default_object_repr():
+    class NoRepr:
+        pass
+
+    assert summarise.has_address_repr(NoRepr()) is True
+    assert "0x" in repr(NoRepr())
 
 
 def test_inline_limit_is_64_and_the_boundary_is_inclusive():
@@ -155,7 +227,7 @@ class Slotted:
 
 def test_objects_expose_fields_or_only_their_type():
     assert summarise.summarise(Plain()) == {"type": "test_summarise.Plain", "fields": {"a": 1, "b": [2]}}
-    assert summarise.summarise(Slotted()) == {"type": "test_summarise.Slotted"}
+    assert summarise.summarise(Slotted()) == {"type": "test_summarise.Slotted", "volatile": True}
     assert summarise.type_name(1) == "int" and summarise.type_name(Plain()) == "test_summarise.Plain"
 
 

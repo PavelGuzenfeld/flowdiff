@@ -107,6 +107,119 @@ def test_verdict_wording_for_each_outcome():
         == "2 of 2 frames differ: f (return); g (return); origin g"
 
 
+def volatile_float() -> dict:
+    return {"type": "float", "volatile": True}
+
+
+def test_is_volatile_requires_the_flag_not_just_a_marker_shape():
+    assert compare.is_volatile(volatile_float()) is True
+    assert compare.is_volatile({"type": "str", "len": 5, "sha256": "a" * 16}) is False
+    assert compare.is_volatile({"type": "float", "volatile": False}) is False
+    assert compare.is_volatile(5) is False
+
+
+def test_two_volatile_markers_of_different_types_still_report_the_type_change():
+    base = {"f": [compare.Call(1, {}, volatile_float(), end=2)]}
+    head = {"f": [compare.Call(1, {}, {"type": "datetime.datetime", "volatile": True}, end=2)]}
+    r = report(base, head, frames=("f",))
+    assert r.divergences("f") == [compare.Divergence("f", 0, "return.type", "float", "datetime.datetime", 2)]
+    assert r.volatile("f") == []
+
+
+def test_a_symmetric_volatile_leaf_plays_identical():
+    base = {"f": [compare.Call(1, {}, volatile_float(), end=2)]}
+    head = {"f": [compare.Call(1, {}, volatile_float(), end=2)]}
+    r = report(base, head, frames=("f",))
+    assert r.divergences("f") == [] and r.volatile("f") == []
+    assert compare.verdict(r) == "identical: 1 frames traced, no value differs"
+
+
+def test_an_asymmetric_volatile_leaf_is_excluded_and_named_in_the_verdict():
+    base = {"f": [compare.Call(1, {}, 1700000000.0, end=2)]}
+    head = {"f": [compare.Call(1, {}, volatile_float(), end=2)]}
+    r = report(base, head, frames=("f",))
+    assert r.divergences("f") == [] and r.origin() is None
+    assert r.volatile("f") == [compare.Divergence("f", 0, "return", 1700000000.0, volatile_float(), 2)]
+    assert compare.verdict(r) == "identical: 1 frames traced, no value differs; excluded as volatile: f.return"
+
+
+def test_a_volatile_marker_on_the_base_side_alone_is_also_excluded():
+    base = {"f": [compare.Call(1, {}, volatile_float(), end=2)]}
+    head = {"f": [compare.Call(1, {}, 1700000000.0, end=2)]}
+    r = report(base, head, frames=("f",))
+    assert r.divergences("f") == [] and r.origin() is None
+    assert r.volatile("f") == [compare.Divergence("f", 0, "return", volatile_float(), 1700000000.0, 2)]
+    assert compare.verdict(r) == "identical: 1 frames traced, no value differs; excluded as volatile: f.return"
+
+
+def test_a_real_divergence_still_wins_the_origin_over_an_earlier_volatile_leaf():
+    base = {"f": [compare.Call(1, {"clock": 1700000000.0}, 10, end=5)]}
+    head = {"f": [compare.Call(1, {"clock": volatile_float()}, 20, end=5)]}
+    r = report(base, head, frames=("f",))
+    assert r.origin() == compare.Divergence("f", 0, "return", 10, 20, 5)
+    assert compare.verdict(r) == "1 of 1 frames differ: f (return); origin f; excluded as volatile: f.clock"
+    assert compare.show(r, "f").splitlines()[1:] == [
+        "  calls #1", "    clock   1700000000.0  →  <float volatile>  (volatile)", "    return  10  →  20"]
+
+
+def test_a_volatile_leaf_nested_inside_an_object_field_is_still_excluded():
+    base = {"f": [compare.Call(1, {}, obj("Out", ts=1700000000.0, ok=True), end=2)]}
+    head = {"f": [compare.Call(1, {}, obj("Out", ts=volatile_float(), ok=True), end=2)]}
+    r = report(base, head, frames=("f",))
+    assert r.divergences("f") == [] and r.origin() is None
+    assert r.volatile("f") == [compare.Divergence("f", 0, "return.ts", 1700000000.0, volatile_float(), 2)]
+    assert compare.verdict(r) == "identical: 1 frames traced, no value differs; excluded as volatile: f.return.ts"
+
+
+def test_a_recorded_volatile_return_round_trips_through_load_and_plays_identical(tmp_path: Path):
+    base = compare.load(write(tmp_path / "base.jsonl", enter("f"), exit_("f", volatile_float())))
+    head = compare.load(write(tmp_path / "head.jsonl", enter("f"), exit_("f", volatile_float())))
+    assert base["f"][0].result == volatile_float() and compare.is_volatile(base["f"][0].result)
+    assert head["f"][0].result == volatile_float() and compare.is_volatile(head["f"][0].result)
+    r = compare.Report(["f"], base, head)
+    assert compare.verdict(r) == "identical: 1 frames traced, no value differs"
+
+
+def test_a_marker_with_volatile_false_is_a_real_divergence_not_excluded():
+    base = {"f": [compare.Call(1, {}, 1700000000.0, end=2)]}
+    head = {"f": [compare.Call(1, {}, {"type": "float", "volatile": False}, end=2)]}
+    r = report(base, head, frames=("f",))
+    divergence = compare.Divergence("f", 0, "return", 1700000000.0, {"type": "float", "volatile": False}, 2)
+    assert r.divergences("f") == [divergence]
+    assert r.volatile("f") == [] and r.origin() == divergence
+    assert compare.verdict(r) == "1 of 1 frames differ: f (return); origin f"
+    assert compare.show(r, "f").splitlines()[1:] == ["  calls #1", "    return  1700000000.0  →  <float>"]
+
+
+def test_volatility_note_dedupes_the_same_leaf_across_repeated_calls():
+    base = {"f": [compare.Call(1, {"a": 1}, 4, end=2), compare.Call(3, {"a": 1}, 4, end=4)]}
+    head = {"f": [compare.Call(1, {"a": volatile_float()}, 4, end=2), compare.Call(3, {"a": volatile_float()}, 4, end=4)]}
+    r = report(base, head, frames=("f",))
+    assert compare.volatility_note(r) == "; excluded as volatile: f.a"
+
+
+def test_volatility_note_lists_up_to_three_leaves_with_no_more_suffix():
+    base = {"f": [compare.Call(1, {"a": 1, "b": 2, "c": 3}, 4, end=2)]}
+    head = {"f": [compare.Call(1, {"a": volatile_float(), "b": volatile_float(), "c": volatile_float()}, 4, end=2)]}
+    r = report(base, head, frames=("f",))
+    assert compare.volatility_note(r) == "; excluded as volatile: f.a, f.b, f.c"
+
+
+def test_volatility_note_truncates_the_fourth_leaf_to_a_more_count():
+    base = {"f": [compare.Call(1, {"a": 1, "b": 2, "c": 3, "d": 4}, 5, end=2)]}
+    head = {"f": [compare.Call(1, {"a": volatile_float(), "b": volatile_float(), "c": volatile_float(),
+                                   "d": volatile_float()}, 5, end=2)]}
+    r = report(base, head, frames=("f",))
+    assert compare.volatility_note(r) == "; excluded as volatile: f.a, f.b, f.c, +1 more"
+
+
+def test_show_with_a_path_labels_a_volatile_leaf_too():
+    base = {"f": [compare.Call(1, {"x": 1700000000.0}, 0, end=2)]}
+    head = {"f": [compare.Call(1, {"x": volatile_float()}, 0, end=2)]}
+    lines = compare.show(report(base, head, frames=("f",)), "f", "x").splitlines()
+    assert lines[1:] == ["  calls #1", "    x  1700000000.0  →  <float volatile>  (volatile)"]
+
+
 def obj(type_name: str, **fields) -> dict:
     return {"type": type_name, "fields": fields}
 
@@ -146,6 +259,13 @@ def test_show_prints_differing_leaves_and_groups_identical_calls():
         "f  base 1 call(s), head 2 call(s)",
         "  calls #1", '    y       "a"  →  —', "    return  4  →  6",
         "  calls #2", "    x       —  →  2", "    return  —  →  8"]
+
+
+def test_show_labels_a_volatile_leaf_instead_of_a_plain_difference():
+    base = {"f": [compare.Call(1, {}, 1700000000.0, end=2)]}
+    head = {"f": [compare.Call(1, {}, volatile_float(), end=2)]}
+    assert compare.show(report(base, head, frames=("f",)), "f").splitlines()[1:] == [
+        "  calls #1", "    return  1700000000.0  →  <float volatile>  (volatile)"]
 
 
 def test_show_groups_repeated_outcomes_and_counts_identical_calls():
@@ -215,6 +335,10 @@ def test_show_call_prints_one_call_whole_and_marks_the_differing_rows():
     assert compare.show_call(r, "f", 0, "cfg.n").splitlines()[1] == "    cfg.n  —  →  true   *"
     assert compare.show_call(r, "f", 0, "return.ok").splitlines()[1] == "    return.ok  true  →  false   *"
     assert compare.show_call(r, "f", 0, "cfg").splitlines()[1:] == ["    cfg.a  1", "    cfg.n  —  →  true   *"]
+    volatile = {"f": [compare.Call(1, {}, volatile_float(), end=2, test="t.py::a")]}
+    plain = {"f": [compare.Call(1, {}, 1700000000.0, end=2, test="t.py::a")]}
+    assert compare.show_call(report(plain, volatile), "f", 0).splitlines()[1] == \
+        "    return  1700000000.0  →  <float volatile>   (volatile)"
     assert compare.show_call(r, "f", 0, "nope").splitlines()[1] == "    nope: not an argument of this call"
     assert compare.show_call(r, "f", 3) == "f  has no call #4"
     only_head = compare.Report(["f"], {}, head)

@@ -5,14 +5,21 @@ Python 3.8 and imports nothing from the rest of flowdiff.
 """
 from __future__ import annotations
 
+import datetime
 import hashlib
 import importlib.util
 import math
 import os
+import re
+import time
+import uuid
 from typing import Any, Callable, Optional
 
 INLINE_LIMIT = 64
 MAX_DEPTH = 4
+# A value this close to the moment it was summarised is a timestamp, not a fixed result.
+WALL_CLOCK_WINDOW = 1.0
+_ADDRESS_RE = re.compile(r"\bat 0x[0-9a-fA-F]+")
 
 _project: Optional[Callable[[str, Any], Optional[dict]]] = None
 # The base worktree and the working tree differ in prefix only, so strings under either compare as
@@ -73,7 +80,11 @@ def summarise(value: Any, depth: int = 0) -> Any:
             return custom
     if value is None or isinstance(value, (bool, int)):
         return value
+    if isinstance(value, (datetime.date, datetime.time, uuid.UUID)):
+        return {"type": type_name(value), "volatile": True}
     if isinstance(value, float):
+        if math.isfinite(value) and abs(value - time.time()) < WALL_CLOCK_WINDOW:
+            return {"type": "float", "volatile": True}
         return value if math.isfinite(value) else repr(value)
     if isinstance(value, str):
         value = relabel(value)
@@ -100,7 +111,16 @@ def summarise(value: Any, depth: int = 0) -> Any:
     if isinstance(fields, dict) and len(fields) <= INLINE_LIMIT:
         return {"type": type_name(value),
                 "fields": {k: summarise(v, depth + 1) for k, v in fields.items() if not k.startswith("_")}}
+    if has_address_repr(value):
+        return {"type": type_name(value), "volatile": True}
     return {"type": type_name(value)}
+
+
+def has_address_repr(value: Any) -> bool:
+    try:
+        return bool(_ADDRESS_RE.search(repr(value)))
+    except Exception:
+        return False
 
 
 def array_summary(array: Any) -> dict:

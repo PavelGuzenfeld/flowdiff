@@ -149,7 +149,7 @@ def test_unserialisable_values_fall_back_to_repr(tmp_path: Path, lib, backend):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     recs = run(tmp_path, module, ["obj.py:make"], lambda m: m.make())
-    assert recs[1]["return"] == {"type": "trace_obj.Weird"}
+    assert recs[1]["return"] == {"type": "trace_obj.Weird", "volatile": True}
 
 
 MUTATORS = """\
