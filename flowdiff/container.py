@@ -18,6 +18,11 @@ LAYER_LABEL = "flowdiff.base"
 # Measured 2026-09-12: no distribution clangd answers callHierarchy/outgoingCalls — 14 on ubuntu 22.04 and
 # 18 on ubuntu 24.04 both reply "method not found", leaving every C++ flow on the textual callee fallback.
 CLANGD_VERSION = "20"
+# apt.llvm.org's "20" suite is a single rolling build per codename, replaced without notice, so an
+# unpinned install gives two machines building on different days two different binaries. Observed
+# 2026-09-13 for ubuntu noble; a base whose codename serves a different exact build falls through to
+# the unpinned attempt just below, then to the distribution clangd, same as before this was pinned.
+CLANGD_PIN = "1:20.1.8~++20250804090239+87f0227cb601-1~exp1~20250804210352.139"
 LAYER_DOCKERFILE = """\
 FROM {base}
 RUN apt-get update && apt-get install -y --no-install-recommends gdb clangd binutils \\
@@ -25,7 +30,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends gdb clangd binu
         && wget -qO /etc/apt/trusted.gpg.d/apt.llvm.org.asc https://apt.llvm.org/llvm-snapshot.gpg.key \\
         && echo "deb http://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs)-{llvm} main" \\
              > /etc/apt/sources.list.d/llvm.list \\
-        && apt-get update && apt-get install -y --no-install-recommends clangd-{llvm} \\
+        && apt-get update \\
+        && (apt-get install -y --no-install-recommends clangd-{llvm}={pin} \\
+            || apt-get install -y --no-install-recommends clangd-{llvm}) \\
         && ln -sf /usr/bin/clangd-{llvm} /usr/bin/clangd \\
         || echo "flowdiff: no apt.llvm.org clangd-{llvm} for this base; keeping the distribution one") \\
     && rm -rf /var/lib/apt/lists/*
@@ -65,12 +72,16 @@ def project_image(root: Path, explicit: str | None) -> str | None:
 
 
 def layer_recipe(base: str, digest: str) -> str:
-    return LAYER_DOCKERFILE.format(base=base, label=LAYER_LABEL, digest=layer_key(digest), llvm=CLANGD_VERSION)
+    return LAYER_DOCKERFILE.format(base=base, label=LAYER_LABEL, digest=layer_key(digest),
+                                   llvm=CLANGD_VERSION, pin=CLANGD_PIN)
 
 
 def layer_key(digest: str) -> str:
-    """The layer is the base image and this recipe, so a changed recipe must rebuild as a changed base does."""
-    return f"{digest}+{hashlib.sha256(LAYER_DOCKERFILE.encode()).hexdigest()[:12]}"
+    """The layer is the base image and this recipe with its clangd version and pin substituted in, so a
+    changed recipe, version or pin must rebuild as a changed base does. {base}/{label}/{digest} are left
+    as literal placeholder text (not .format()'d) so this cannot loop back on the digest it is computing."""
+    substituted = LAYER_DOCKERFILE.replace("{llvm}", CLANGD_VERSION).replace("{pin}", CLANGD_PIN)
+    return f"{digest}+{hashlib.sha256(substituted.encode()).hexdigest()[:12]}"
 
 
 def layered_image(root: Path, base: str) -> str:

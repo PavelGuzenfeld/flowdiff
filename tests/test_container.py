@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -83,12 +84,70 @@ def test_a_changed_layer_recipe_rebuilds_as_a_changed_base_does(fake, tmp_path: 
     assert len([c for c in fake.calls if c[1] == "build"]) == 2
 
 
+def test_a_changed_clangd_pin_rebuilds_a_cached_layer_instead_of_reusing_it(fake, tmp_path: Path, monkeypatch):
+    """The bug this fix closes: layer_key used to ignore CLANGD_PIN/CLANGD_VERSION entirely, so a
+    pin bump left a stale cached layer's label matching and layered_image kept reusing it unbuilt."""
+    root = tmp_path / "proj"
+    container.layered_image(root, "proj:dev")
+    assert len([c for c in fake.calls if c[1] == "build"]) == 1
+    monkeypatch.setattr(container, "CLANGD_PIN", "1:99.0.0-1~exp1")
+    container.layered_image(root, "proj:dev")
+    assert len([c for c in fake.calls if c[1] == "build"]) == 2
+
+
 def test_the_layer_installs_a_clangd_that_answers_outgoing_calls_and_keeps_a_fallback():
     text = container.layer_recipe("proj:dev", "sha256:x")
     assert text.startswith("FROM proj:dev\n") and "gdb" in text and "binutils" in text
+    assert "apt-get install -y --no-install-recommends gdb clangd binutils" in text
     assert "apt.llvm.org" in text and f"clangd-{container.CLANGD_VERSION}" in text
+    assert container.CLANGD_PIN in text
     assert "keeping the distribution one" in text
     assert text.rstrip().endswith("LABEL flowdiff.base=" + container.layer_key("sha256:x"))
+
+
+def test_clangd_pin_is_set_and_matches_clangd_versions_major():
+    """A re-pin that forgets to bump CLANGD_VERSION alongside it (or vice versa) makes the pinned apt
+    install always fail and silently fall through to tier 2 — the exact drift this pin exists to catch."""
+    assert container.CLANGD_PIN != ""
+    epoch, _, upstream = container.CLANGD_PIN.partition(":")
+    assert upstream.startswith(container.CLANGD_VERSION + ".")
+
+
+def test_the_layer_tries_the_pin_then_unpinned_then_the_distribution_clangd_in_that_order(monkeypatch):
+    monkeypatch.setattr(container, "CLANGD_VERSION", "20")
+    monkeypatch.setattr(container, "CLANGD_PIN", "1:20.1.8-1~exp1")
+    text = container.layer_recipe("proj:dev", "sha256:x")
+    pinned = text.index("apt-get install -y --no-install-recommends clangd-20=1:20.1.8-1~exp1")
+    unpinned = text.index("apt-get install -y --no-install-recommends clangd-20)")
+    distro = text.index("keeping the distribution one")
+    assert pinned < unpinned < distro
+
+
+def test_a_changed_clangd_version_rebuilds_as_a_changed_recipe_does(monkeypatch):
+    """layer_key used to hash the raw, un-substituted template: bumping CLANGD_VERSION left the key
+    unchanged, so a stale cached layer with the old clangd would keep being reused as "up to date"."""
+    before = container.layer_key("sha256:x")
+    monkeypatch.setattr(container, "CLANGD_VERSION", "21")
+    assert container.layer_key("sha256:x") != before
+
+
+def test_a_changed_clangd_pin_rebuilds_as_a_changed_recipe_does(monkeypatch):
+    before = container.layer_key("sha256:x")
+    monkeypatch.setattr(container, "CLANGD_PIN", "1:99.0.0-1~exp1")
+    assert container.layer_key("sha256:x") != before
+
+
+def test_layer_keys_recipe_hash_is_12_lowercase_hex_characters():
+    """Not a golden literal: that would break on every future CLANGD_PIN re-pin, the exact maintenance
+    this pin is meant to make routine, without saying anything about what broke."""
+    digest, _, recipe_hash = container.layer_key("sha256:x").partition("+")
+    assert digest == "sha256:x" and re.fullmatch(r"[0-9a-f]{12}", recipe_hash)
+
+
+def test_layer_keys_recipe_hash_is_independent_of_the_base_digest():
+    """digest and the recipe hash are two separate, concatenated components; a layer_key that folded
+    the digest into the hashed text would also change per-digest, matching every inequality test here."""
+    assert container.layer_key("sha256:a").split("+", 1)[1] == container.layer_key("sha256:b").split("+", 1)[1]
 
 
 def test_docker_failures_raise_with_the_subcommand(fake):

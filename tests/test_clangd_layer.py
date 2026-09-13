@@ -44,6 +44,31 @@ def project(tree: Path) -> Path:
     return src
 
 
+def installed_clangd_version(image: str) -> str:
+    return subprocess.run(["docker", "run", "--rm", image, "dpkg-query", "-W", "-f=${Version}",
+                           f"clangd-{container.CLANGD_VERSION}"], check=True, capture_output=True, text=True).stdout.strip()
+
+
+@needs_docker
+def test_the_layer_installs_the_exact_pinned_clangd_version():
+    """A wrong or GC'd CLANGD_PIN falls through to an unpinned same-major install (still passing the
+    other layer test), so only checking dpkg's own record of what actually landed catches a stale pin."""
+    assert installed_clangd_version(layer_image()) == container.CLANGD_PIN
+
+
+@needs_docker
+def test_a_pin_apt_llvm_org_does_not_have_still_installs_clangd(monkeypatch):
+    """Proves the "||" actually falls through at build time, not just that the fallback text appears
+    somewhere in the Dockerfile: a pin apt.llvm.org has never served must not abort the whole install."""
+    monkeypatch.setattr(container, "CLANGD_PIN", "1:0.0.0~nonexistent-1~exp1")
+    tag = "flowdiff/layer-test-badpin:dev"
+    with tempfile.TemporaryDirectory(prefix="flowdiff-layer-test-badpin-") as tmp:
+        (Path(tmp) / "Dockerfile").write_text(container.layer_recipe(BASE, "sha256:test-badpin"))
+        subprocess.run(["docker", "build", "-q", "-t", tag, tmp], check=True, capture_output=True, text=True)
+    installed = installed_clangd_version(tag)
+    assert installed and installed != "1:0.0.0~nonexistent-1~exp1"
+
+
 @needs_docker
 def test_the_layers_clangd_answers_outgoing_calls_with_the_callee(tmp_path: Path):
     image = layer_image()
