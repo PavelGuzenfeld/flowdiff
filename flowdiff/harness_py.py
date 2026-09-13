@@ -15,8 +15,9 @@ import os
 import sys
 
 sys.path[:0] = [os.environ["FLOWDIFF_TOOL"]]
-from flowdiff.trace_py import trace
+from flowdiff.trace_py import maybe_freeze, trace
 
+maybe_freeze()
 {imports}
 with trace(os.environ["FLOWDIFF_TREE"], {frames!r}, os.environ["FLOWDIFF_OUT"]):
 {body}

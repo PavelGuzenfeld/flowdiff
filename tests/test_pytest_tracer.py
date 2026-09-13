@@ -53,6 +53,18 @@ def test_a_fresh_plugin_has_no_tracer_and_finishing_without_a_start_does_nothing
     assert fresh._tracer is None
 
 
+def test_configure_freezes_before_sessionstart_so_conftest_and_test_modules_see_it(monkeypatch):
+    seen = []
+    monkeypatch.setattr(pytest_tracer, "maybe_freeze", lambda: seen.append("frozen"))
+    pytest_tracer.pytest_configure(None)
+    assert seen == ["frozen"]
+
+
+def test_configure_calls_the_shared_trace_py_maybe_freeze_not_a_plugin_local_one():
+    from flowdiff import trace_py
+    assert pytest_tracer.maybe_freeze is trace_py.maybe_freeze
+
+
 def project(tmp_path: Path) -> Path:
     (tmp_path / "lib.py").write_text("def scale(v):\n    return v * 2\n\n\ndef entry(v):\n    return scale(v)\n")
     (tmp_path / "tests").mkdir()
@@ -66,6 +78,23 @@ def run_pytest(tree: Path, out: Path, *ids: str) -> subprocess.CompletedProcess:
     return subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
                            "-p", "flowdiff.pytest_tracer", *ids], cwd=tree, capture_output=True, text=True,
                           env=env.harness_env(tree, "head", out, ["lib.py:scale"]))
+
+
+def test_configure_freezes_time_before_pytest_collects_the_target_module(tmp_path: Path):
+    """STAMP is computed once, at module import time — a call-time time.time() would pass even if the freeze
+    happened after collection, since pytest_configure and the frozen call would still both run before the
+    test itself. Only a module-level snapshot distinguishes "before the import" from "before the call"."""
+    tmp_path.joinpath("lib.py").write_text("import time\n\nSTAMP = int(time.time())\n\n\ndef stamp():\n    return STAMP\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_lib.py").write_text(
+        "from lib import stamp\n\n\ndef test_stamp():\n    assert stamp() == 1700000000\n")
+    out = tmp_path / "trace.jsonl"
+    proc = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                           "-p", "flowdiff.pytest_tracer", "tests/test_lib.py::test_stamp"],
+                          cwd=tmp_path, capture_output=True, text=True,
+                          env=env.harness_env(tmp_path, "head", out, ["lib.py:stamp"], freeze=True))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert compare.load(out)["lib.py:stamp"][0].result == 1700000000
 
 
 def test_plugin_traces_the_named_frames_across_every_collected_test(tmp_path: Path):

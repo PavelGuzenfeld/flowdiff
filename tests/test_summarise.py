@@ -133,6 +133,14 @@ def test_the_wall_clock_window_upper_boundary_mirrors_the_lower_one(monkeypatch)
     assert summarise.summarise(2001.0 - 1e-9) == {"type": "float", "volatile": True}
 
 
+def test_freezing_the_clock_moves_the_wall_clock_window_with_it(monkeypatch):
+    """--freeze pins time.time() to a fixed instant (flowdiff.trace_py.FROZEN_EPOCH); the window follows it,
+    so a value equal to that frozen instant is marked volatile and a genuine stored timestamp far from it is not."""
+    monkeypatch.setattr(summarise.time, "time", lambda: 1700000000.0)
+    assert summarise.summarise(1700000000.0) == {"type": "float", "volatile": True}
+    assert summarise.summarise(1900000000.0) == 1900000000.0
+
+
 def test_datetime_date_and_time_values_are_marked_volatile():
     assert summarise.summarise(datetime.datetime(2020, 1, 1)) == {"type": "datetime.datetime", "volatile": True}
     assert summarise.summarise(datetime.date(2020, 1, 1)) == {"type": "datetime.date", "volatile": True}

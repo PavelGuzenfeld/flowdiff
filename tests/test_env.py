@@ -78,3 +78,10 @@ def test_harness_env_without_a_trace_sets_no_flowdiff_variables(tmp_path: Path, 
     e = env.harness_env(tmp_path)
     assert e["PYTHONPATH"] == str(tmp_path)
     assert not [k for k in e if k.startswith("FLOWDIFF_")]
+
+
+def test_harness_env_sets_freeze_only_when_asked_and_only_with_a_trace(tmp_path: Path):
+    e = env.harness_env(tmp_path, "base", tmp_path / "out.jsonl", freeze=True)
+    assert e["FLOWDIFF_FREEZE"] == "1"
+    assert "FLOWDIFF_FREEZE" not in env.harness_env(tmp_path, "base", tmp_path / "out.jsonl")
+    assert "FLOWDIFF_FREEZE" not in env.harness_env(tmp_path, freeze=True)

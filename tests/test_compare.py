@@ -107,6 +107,38 @@ def test_verdict_wording_for_each_outcome():
         == "2 of 2 frames differ: f (return); g (return); origin g"
 
 
+def test_frozen_note_appears_only_when_frozen():
+    same = {"f": [compare.Call(1, {"x": 1}, 2, end=2)]}
+    plain = report(same, same, frames=("f",))
+    assert compare.frozen_note(plain) == ""
+    frozen = compare.Report(["f"], same, same, frozen=True)
+    assert compare.frozen_note(frozen) == "  (time frozen, random seeded)"
+    assert compare.verdict(frozen) == "identical: 1 frames traced, no value differs  (time frozen, random seeded)"
+
+
+def test_frozen_note_also_appears_on_the_frames_differ_line():
+    base = {"f": [compare.Call(1, {"x": 1}, 4, end=2)]}
+    head = {"f": [compare.Call(1, {"x": 1}, 6, end=2)]}
+    r = compare.Report(["f"], base, head, frozen=True)
+    assert compare.verdict(r) == "1 of 1 frames differ: f (return); origin f  (time frozen, random seeded)"
+
+
+def test_frozen_note_follows_the_volatility_note_when_both_apply():
+    base = {"f": [compare.Call(1, {}, 1700000000.0, end=2)]}
+    head = {"f": [compare.Call(1, {}, volatile_float(), end=2)]}
+    r = compare.Report(["f"], base, head, frozen=True)
+    assert compare.verdict(r) == ("identical: 1 frames traced, no value differs"
+                                  "; excluded as volatile: f.return  (time frozen, random seeded)")
+
+
+def test_verdict_combines_the_tolerance_and_frozen_notes_in_order():
+    base = {"f": [compare.Call(1, {}, 1.0, end=2)]}
+    head = {"f": [compare.Call(1, {}, 1.0000000005, end=2)]}
+    r = compare.Report(["f"], base, head, float_tol=1e-9, frozen=True)
+    assert compare.verdict(r) == ("identical: 1 frames traced, no value differs"
+                                  "  (float tolerance abs=1e-09)  (time frozen, random seeded)")
+
+
 def volatile_float() -> dict:
     return {"type": "float", "volatile": True}
 

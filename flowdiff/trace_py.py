@@ -8,8 +8,10 @@ from __future__ import annotations
 import inspect
 import json
 import os
+import random
 import sys
 import threading
+import time
 from collections import Counter
 from typing import Any, Iterable, Optional
 
@@ -19,6 +21,20 @@ from . import summarise
 # Rebinding a parameter moves the local without touching the caller's object, and two parameters
 # holding one object cannot be told apart by name, so neither can be pinned from an exit value.
 IMMUTABLE = (bool, int, float, complex, str, bytes, type(None))
+
+# An arbitrary fixed instant: determinism, not realism, is the point of freezing the clock.
+FROZEN_EPOCH = 1700000000.0
+
+
+def maybe_freeze() -> None:
+    """Opt-in (FLOWDIFF_FREEZE): pin time.time() and seed random so both sides run at the same instant.
+
+    time.monotonic() is left alone — a deadline or elapsed-time check built on it must still advance,
+    or the traced code hangs until the harness times out.
+    """
+    if os.environ.get("FLOWDIFF_FREEZE"):
+        time.time = lambda: FROZEN_EPOCH
+        random.seed(0)
 
 
 def frame_key(tree: str, filename: str, name: str) -> Optional[str]:

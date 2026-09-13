@@ -173,6 +173,15 @@ def test_build_writes_a_single_body_harness_over_the_flow_frames(tmp_path: Path)
     compile(harness.source, "harness", "exec")
 
 
+def test_maybe_freeze_runs_before_the_target_module_is_imported(tmp_path: Path):
+    client, scale, entry = project(tmp_path)
+    slot = graph.Node("slot:x", "->x", tmp_path / "lib.py", 0, 0, "slot")
+    g = graph_of(scale, entry, slot, edges=[(entry, scale)])
+    harness = harness_py.build(client, tmp_path, tmp_path / ".flowdiff" / "base", flow_of(scale, [scale, slot]), g)
+    assert "from flowdiff.trace_py import maybe_freeze, trace" in harness.source
+    assert harness.source.index("maybe_freeze()") < harness.source.index("import lib\n")
+
+
 def test_build_driven_from_a_caller_keeps_the_flow_frames_and_warns(tmp_path: Path):
     client, scale, entry = project(tmp_path)
     no_direct_literal(tmp_path)
@@ -203,6 +212,7 @@ def test_two_body_harvests_each_side_and_warns_when_the_arguments_differ(repo: P
                                 "the inputs rather than the code",)
     assert "if os.environ[\"FLOWDIFF_SIDE\"] == \"base\":\n        lib.scale(7)\n    else:\n        lib.scale(4)\n" \
         in harness.source
+    assert harness.source.index("maybe_freeze()") < harness.source.index("import lib\n")
     compile(harness.source, "harness", "exec")
 
 

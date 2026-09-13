@@ -110,6 +110,37 @@ def test_run_harness_writes_the_trace_for_the_side(tmp_path: Path):
     assert compare.load(out)["lib.py:f"][0].result == 4
 
 
+def spy_harness_env(seen: dict):
+    def spy(*a, **k):
+        seen["kwargs"] = k
+        return dict(os.environ)
+    return spy
+
+
+def test_run_harness_forwards_freeze_to_harness_env(tmp_path: Path, monkeypatch):
+    py = fake_interpreter(tmp_path)
+    seen: dict = {}
+    monkeypatch.setattr(play.env, "harness_env", spy_harness_env(seen))
+    play.run_harness(py, tmp_path / "h.py", tmp_path, "base", tmp_path / "out.jsonl", 10, freeze=True)
+    assert seen["kwargs"] == {"freeze": True}
+    play.run_harness(py, tmp_path / "h.py", tmp_path, "head", tmp_path / "out.jsonl", 10, freeze=True)
+    assert seen["kwargs"] == {"freeze": True}
+    play.run_harness(py, tmp_path / "h.py", tmp_path, "head", tmp_path / "out.jsonl", 10)
+    assert seen["kwargs"] == {"freeze": False}
+
+
+def test_run_traced_tests_forwards_freeze_to_harness_env(tmp_path: Path, monkeypatch):
+    py = fake_interpreter(with_tests(tmp_path, "pass"))
+    seen: dict = {}
+    monkeypatch.setattr(play.env, "harness_env", spy_harness_env(seen))
+    play.run_traced_tests(py, tmp_path, ["t.py::pass"], ["lib.py:f"], "base", tmp_path / "out.jsonl", 10, freeze=True)
+    assert seen["kwargs"] == {"freeze": True}
+    play.run_traced_tests(py, tmp_path, ["t.py::pass"], ["lib.py:f"], "head", tmp_path / "out.jsonl", 10, freeze=True)
+    assert seen["kwargs"] == {"freeze": True}
+    play.run_traced_tests(py, tmp_path, ["t.py::pass"], ["lib.py:f"], "head", tmp_path / "out.jsonl", 10)
+    assert seen["kwargs"] == {"freeze": False}
+
+
 def test_run_harness_reports_exit_code_with_stderr_and_timeouts(tmp_path: Path, monkeypatch):
     py = fake_interpreter(tmp_path)
     monkeypatch.setenv("FAKE_EXIT", "3")

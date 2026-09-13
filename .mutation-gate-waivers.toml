@@ -1,0 +1,7 @@
+[[waiver]]
+file = "flowdiff/trace_py.py"
+line = 25
+column = 15
+old = """1700000000.0"""
+new = """1.7e+09"""
+reason = "Equivalent mutant: 1700000000.0 == 1.7e+09 exactly (same float, different literal spelling); no test can observe a difference."
