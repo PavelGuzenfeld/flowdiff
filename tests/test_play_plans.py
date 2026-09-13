@@ -41,6 +41,22 @@ def test_python_plan_uses_the_harness_when_it_is_complete(tmp_path: Path, monkey
     assert plan.delta() == ["  d"]
 
 
+def test_python_plan_dry_run_names_the_harness_command_without_running_it(tmp_path: Path, monkeypatch):
+    flow, nodes = flow_of(tmp_path)
+    monkeypatch.setattr(harness_py, "build", lambda *a: harness_py.Harness("SRC", True))
+    monkeypatch.setattr(play.env, "python_interpreter", lambda root: Path("/py"))
+
+    def must_not_run(*a):
+        raise AssertionError("dry-run must not invoke run_harness")
+    monkeypatch.setattr(play, "run_harness", must_not_run)
+    out = tmp_path / "run"
+    out.mkdir()
+    base = tmp_path / "base"
+    plan = play.python_plan(FakeClient(tmp_path, {}, {}), graph.Graph(), flow, tmp_path, base, out, 1, 9.0)
+    assert plan.plan_lines() == [f"base: cwd={base}  /py {out / 'flow1.py'}",
+                                 f"head: cwd={tmp_path}  /py {out / 'flow1.py'}"]
+
+
 def test_python_plan_falls_back_to_shared_tests_then_stops(tmp_path: Path, monkeypatch):
     flow, nodes = flow_of(tmp_path)
     monkeypatch.setattr(harness_py, "build", lambda *a: harness_py.Harness("SRC", False))
@@ -63,6 +79,46 @@ def test_python_plan_falls_back_to_shared_tests_then_stops(tmp_path: Path, monke
     assert play.python_plan(FakeClient(tmp_path, {}, {}), graph.Graph(), flow, tmp_path, tmp_path / "base", out, 4, 9.0).delta is None
 
 
+def test_python_plan_dry_run_names_the_pytest_command_for_shared_tests(tmp_path: Path, monkeypatch):
+    flow, nodes = flow_of(tmp_path)
+    monkeypatch.setattr(harness_py, "build", lambda *a: harness_py.Harness("SRC", False))
+    monkeypatch.setattr(play.env, "python_interpreter", lambda root: Path("/py"))
+    monkeypatch.setattr(play, "shared_tests", lambda base, root, tests: (["tests/test_lib.py::test_scale"], []))
+    monkeypatch.setattr(play, "present", lambda tree, test: True)
+
+    def must_not_run(*a):
+        raise AssertionError("dry-run must not invoke run_traced_tests")
+    monkeypatch.setattr(play, "run_traced_tests", must_not_run)
+    out = tmp_path / "run"
+    out.mkdir()
+    base = tmp_path / "base"
+    plan = play.python_plan(FakeClient(tmp_path, {}, {}), graph.Graph(), flow, tmp_path, base, out, 5, 9.0)
+    lines = plan.plan_lines()
+    pytest_cmd = (f"-m pytest -q -p no:cacheprovider -p flowdiff.pytest_tracer --basetemp={out / 'basetemp'} "
+                 "tests/test_lib.py::test_scale")
+    assert lines == [f"base: cwd={base}  /py {pytest_cmd}", f"head: cwd={tmp_path}  /py {pytest_cmd}"]
+
+
+def test_python_plan_dry_run_reports_a_side_missing_the_covering_test(tmp_path: Path, monkeypatch):
+    flow, nodes = flow_of(tmp_path)
+    monkeypatch.setattr(harness_py, "build", lambda *a: harness_py.Harness("SRC", False))
+    monkeypatch.setattr(play.env, "python_interpreter", lambda root: Path("/py"))
+    monkeypatch.setattr(play, "shared_tests", lambda base, root, tests: (["tests/test_lib.py::test_scale"], []))
+    out = tmp_path / "run"
+    out.mkdir()
+    base = tmp_path / "base"
+    monkeypatch.setattr(play, "present", lambda tree, test: tree != base)
+
+    def must_not_run(*a):
+        raise AssertionError("dry-run must not invoke run_traced_tests")
+    monkeypatch.setattr(play, "run_traced_tests", must_not_run)
+    plan = play.python_plan(FakeClient(tmp_path, {}, {}), graph.Graph(), flow, tmp_path, base, out, 6, 9.0)
+    lines = plan.plan_lines()
+    pytest_cmd = (f"-m pytest -q -p no:cacheprovider -p flowdiff.pytest_tracer --basetemp={out / 'basetemp'} "
+                 "tests/test_lib.py::test_scale")
+    assert lines == ["base: none of the covering tests exist on this side", f"head: cwd={tmp_path}  /py {pytest_cmd}"]
+
+
 class FakeCpp:
     def __init__(self, monkeypatch, exes=None, literal=None, device=()):
         self.calls: list = []
@@ -72,8 +128,9 @@ class FakeCpp:
         monkeypatch.setattr(harness_cpp, "harvest", lambda client, root, entry: self.literal)
         monkeypatch.setattr(harness_cpp, "build_harness", self.build_harness)
         monkeypatch.setattr(harness_cpp, "trace_tests", self.trace_tests)
-        monkeypatch.setattr(harness_cpp, "run_executables", lambda ctr, tree, exes, t: {e: ("PASS" if tree.name != "base" else "FAIL") for e in exes})
-        monkeypatch.setattr(harness_cpp, "linked_variant", lambda ctr, tree, exes: (list(device), "linked: x (device build)" if device else "linked: no device libraries (host build)"))
+        monkeypatch.setattr(harness_cpp, "run_executables", self.run_executables)
+        monkeypatch.setattr(harness_cpp, "linked_variant", self.linked_variant)
+        self.device = device
         monkeypatch.setattr(container, "build", self.build)
         self.build_failure = None
         self.harness_failure = None
@@ -81,6 +138,14 @@ class FakeCpp:
     def build(self, ctr, tree, timeout):
         self.calls.append(("build", tree))
         return self.build_failure
+
+    def run_executables(self, ctr, tree, exes, t):
+        self.calls.append(("run_executables", tree))
+        return {e: ("PASS" if tree.name != "base" else "FAIL") for e in exes}
+
+    def linked_variant(self, ctr, tree, exes):
+        self.calls.append(("linked_variant", tree))
+        return (list(self.device), "linked: x (device build)" if self.device else "linked: no device libraries (host build)")
 
     def build_harness(self, ctr, tree, source, call, out_rel, timeout):
         self.calls.append(("harness", tree, source, call, out_rel))
@@ -114,6 +179,34 @@ def test_cpp_plan_prefers_the_literal_harness_and_builds_the_base_once(tmp_path:
     assert plan.trailer == ["linked: no device libraries (host build)"]
     assert plan.mock is True and plan.device_libraries == []
     assert plan.delta() == ["  builddir/tests/test_lib  FAIL→PASS"]
+
+
+def test_cpp_plan_no_build_drives_the_flow_without_building_either_side(tmp_path: Path, monkeypatch):
+    flow, nodes = flow_of(tmp_path, tests=("tests/test_lib.cpp::test_scale",), language="cpp")
+    fake = FakeCpp(monkeypatch, literal=["4", "true"])
+    out = tmp_path / "run"
+    out.mkdir()
+    base = tmp_path / ".flowdiff" / "base"
+    (base / ".flowdiff" / "run").mkdir(parents=True)
+    ctr = container.Container("img", "/src")
+    plan = play.cpp_plan(ctr, FakeClient(tmp_path, {}, {}), flow, tmp_path, base, out, 1, 9.0, 99.0, no_build=True)
+    assert plan.drive("head", tmp_path) is None and plan.drive("base", base) is None
+    assert [c for c in fake.calls if c[0] == "build"] == []
+    assert [c for c in fake.calls if c[0] == "harness"] != []
+
+
+def test_cpp_plan_dry_run_skips_the_readelf_device_check_at_construction(tmp_path: Path, monkeypatch):
+    flow, nodes = flow_of(tmp_path, tests=("tests/test_lib.cpp::test_scale",), language="cpp")
+    fake = FakeCpp(monkeypatch, literal=["4", "true"])
+    out = tmp_path / "run"
+    out.mkdir()
+    base = tmp_path / ".flowdiff" / "base"
+    (base / ".flowdiff" / "run").mkdir(parents=True)
+    ctr = container.Container("img", "/src")
+    plan = play.cpp_plan(ctr, FakeClient(tmp_path, {}, {}), flow, tmp_path, base, out, 1, 9.0, 99.0,
+                         dry_run=True)
+    assert plan.trailer == [] and plan.stop is None
+    assert [c for c in fake.calls if c[0] == "linked_variant"] == []
 
 
 def test_cpp_plan_falls_back_to_test_executables_and_reports_each_failure(tmp_path: Path, monkeypatch):
@@ -157,6 +250,97 @@ def test_cpp_plan_stops_without_a_driver_or_with_a_device_library(tmp_path: Path
     FakeCpp(monkeypatch, literal=["9"])
     plan = play.cpp_plan(ctr, FakeClient(tmp_path, {}, {}), two_body, tmp_path, tmp_path / "b", tmp_path, 1, 9.0, 99.0)
     assert plan.driver is None and plan.note == "driven by 1 covering test executable(s) under gdb"
+
+
+def test_cpp_plan_dry_run_names_build_harness_and_gdb_commands_on_both_sides_without_running_them(
+        tmp_path: Path, monkeypatch):
+    flow, nodes = flow_of(tmp_path, tests=("tests/test_lib.cpp::test_scale",), language="cpp")
+    fake = FakeCpp(monkeypatch, literal=["4", "true"])
+    monkeypatch.setattr(container, "build_steps",
+                        lambda ctr, tree: [["cmake", "-S", ".", "-B", "builddir"], ["cmake", "--build", "builddir"]])
+    monkeypatch.setattr(harness_cpp, "harness_plan",
+                        lambda ctr, tree, entry, call, out_rel: ("SRC", [["c++", "-c", "harness.cpp"],
+                                                                          ["c++", "harness.o", "-o", "harness"]]))
+    out = tmp_path / "run"
+    out.mkdir()
+    base = tmp_path / ".flowdiff" / "base"
+    (base / ".flowdiff" / "run").mkdir(parents=True)
+    ctr = container.Container("img", "/src")
+    plan = play.cpp_plan(ctr, FakeClient(tmp_path, {}, {}), flow, tmp_path, base, out, 1, 9.0, 99.0, dry_run=True)
+    lines = plan.plan_lines()
+    assert fake.calls == []
+    gdb = "gdb -batch -q -nx -x .flowdiff/run/gdb0.py --args /src/.flowdiff/run/harness1/harness"
+    assert lines == [f"{side}: {rest}" for side in ("base", "head") for rest in
+                     ["cmake -S . -B builddir", "cmake --build builddir",
+                      "harness includes lib.cpp, calls scale(4, true)",
+                      "c++ -c harness.cpp", "c++ harness.o -o harness",
+                      "breakpoints on clamp, scale", gdb]]
+
+
+def test_cpp_plan_dry_run_continues_past_a_side_with_no_build_system(tmp_path: Path, monkeypatch):
+    flow, nodes = flow_of(tmp_path, tests=("tests/test_lib.cpp::test_scale",), language="cpp")
+    fake = FakeCpp(monkeypatch, literal=["4", "true"])
+    base = tmp_path / ".flowdiff" / "base"
+    (base / ".flowdiff" / "run").mkdir(parents=True)
+    monkeypatch.setattr(container, "build_steps",
+                        lambda ctr, tree: "no build system to run" if tree == base else
+                        [["cmake", "-S", ".", "-B", "builddir"], ["cmake", "--build", "builddir"]])
+    monkeypatch.setattr(harness_cpp, "harness_plan", lambda *a: ("SRC", [["cc"], ["ld"]]))
+    out = tmp_path / "run"
+    out.mkdir()
+    ctr = container.Container("img", "/src")
+    plan = play.cpp_plan(ctr, FakeClient(tmp_path, {}, {}), flow, tmp_path, base, out, 1, 9.0, 99.0, dry_run=True)
+    lines = plan.plan_lines()
+    assert fake.calls == []
+    gdb = "gdb -batch -q -nx -x .flowdiff/run/gdb0.py --args /src/.flowdiff/run/harness1/harness"
+    assert lines == ["base: no build system to run",
+                     "head: cmake -S . -B builddir", "head: cmake --build builddir",
+                     "head: harness includes lib.cpp, calls scale(4, true)", "head: cc", "head: ld",
+                     "head: breakpoints on clamp, scale", f"head: {gdb}"]
+
+
+def test_cpp_plan_dry_run_continues_past_a_side_without_a_compile_database(tmp_path: Path, monkeypatch):
+    flow, nodes = flow_of(tmp_path, tests=("tests/test_lib.cpp::test_scale",), language="cpp")
+    fake = FakeCpp(monkeypatch, literal=["4", "true"])
+    base = tmp_path / ".flowdiff" / "base"
+    (base / ".flowdiff" / "run").mkdir(parents=True)
+    monkeypatch.setattr(container, "build_steps", lambda ctr, tree: [["cmake", "--build", "builddir"]])
+    monkeypatch.setattr(harness_cpp, "harness_plan",
+                        lambda ctr, tree, *a: None if tree == base else ("SRC", [["cc"], ["ld"]]))
+    out = tmp_path / "run"
+    out.mkdir()
+    ctr = container.Container("img", "/src")
+    plan = play.cpp_plan(ctr, FakeClient(tmp_path, {}, {}), flow, tmp_path, base, out, 1, 9.0, 99.0, dry_run=True)
+    lines = plan.plan_lines()
+    assert fake.calls == []
+    gdb = "gdb -batch -q -nx -x .flowdiff/run/gdb0.py --args /src/.flowdiff/run/harness1/harness"
+    assert lines == ["base: cmake --build builddir",
+                     "base: lib.cpp not yet in a compile database; build first to plan the harness",
+                     "head: cmake --build builddir",
+                     "head: harness includes lib.cpp, calls scale(4, true)", "head: cc", "head: ld",
+                     "head: breakpoints on clamp, scale", f"head: {gdb}"]
+
+
+def test_cpp_plan_dry_run_falls_back_to_test_executables_or_reports_their_absence(tmp_path: Path, monkeypatch):
+    flow, nodes = flow_of(tmp_path, tests=("tests/test_lib.cpp::test_scale",), language="cpp")
+    fake = FakeCpp(monkeypatch, literal=None)
+    monkeypatch.setattr(container, "build_steps", lambda ctr, tree: [])
+    out = tmp_path / "run"
+    out.mkdir()
+    base = tmp_path / ".flowdiff" / "base"
+    (base / ".flowdiff" / "run").mkdir(parents=True)
+    ctr = container.Container("img", "/src")
+    plan = play.cpp_plan(ctr, FakeClient(tmp_path, {}, {}), flow, tmp_path, base, out, 1, 9.0, 99.0, dry_run=True)
+    lines = plan.plan_lines()
+    assert fake.calls == []
+    gdb = "gdb -batch -q -nx -x .flowdiff/run/gdb0.py --args /src/builddir/tests/test_lib"
+    assert lines == ["base: already configured and built", "base: breakpoints on clamp, scale", f"base: {gdb}",
+                     "head: already configured and built", "head: breakpoints on clamp, scale", f"head: {gdb}"]
+    fake.exes = {}
+    lines = plan.plan_lines()
+    assert fake.calls == []
+    assert lines == ["base: already configured and built", "base: no covering test executable found on this side",
+                     "head: already configured and built", "head: no covering test executable found on this side"]
 
 
 def fake_analyse(monkeypatch, root: Path, flows, language="python", ctr=None):
@@ -252,7 +436,7 @@ def test_run_routes_cpp_flows_mock_status_into_the_exit_code_and_index(repo: Pat
     ctr = container.Container("img", "/src")
     fake_analyse(monkeypatch, repo, [flow], language="cpp", ctr=ctr)
 
-    def cpp_plan(c, client, f, root, base, out_dir, index, timeout, build_timeout, no_build=False):
+    def cpp_plan(c, client, f, root, base, out_dir, index, timeout, build_timeout, no_build=False, dry_run=False):
         return written_plan(root, ["lib.cpp:scale", "lib.cpp:clamp"], 8, 8, driver="lib.cpp:scale",
                             mock=True, device_libraries=[], trailer=["linked: no device libraries (host build)"])
     monkeypatch.setattr(play, "cpp_plan", cpp_plan)
@@ -291,6 +475,92 @@ def test_run_depth_still_shows_a_frame_the_tolerance_forgave(repo: Path, monkeyp
     assert play.run(args_for(repo, "--depth", "1", "--float-tol", "1e-9")) == 0
     assert "lib.py:scale  base 1 call(s), head 1 call(s)\n  calls #1\n    return  1.0  →  1.0000000005\n" \
         in capsys.readouterr().out
+
+
+def test_run_dry_run_prints_plan_lines_and_never_drives_or_writes_the_index(repo: Path, monkeypatch, capsys):
+    flow, nodes = flow_of(repo)
+    fake_analyse(monkeypatch, repo, [flow])
+
+    def must_not_drive(side, tree):
+        raise AssertionError("dry-run must not invoke drive")
+
+    def must_not_run_delta():
+        raise AssertionError("dry-run must not invoke delta")
+    plan = play.Plan(["lib.py:scale", "lib.py:clamp"], drive=must_not_drive, delta=must_not_run_delta,
+                     plan_lines=lambda: ["base: plan-a", "head: plan-b"])
+    monkeypatch.setattr(play, "python_plan", lambda *a: plan)
+    assert play.run(args_for(repo, "--dry-run")) == 0
+    assert "base: plan-a\nhead: plan-b" in capsys.readouterr().out
+    assert not (repo / ".flowdiff" / "run" / "index.json").exists()
+
+
+def test_run_dry_run_visits_every_flow_with_one_blank_line_between(repo: Path, monkeypatch, capsys):
+    flow1, _ = flow_of(repo)
+    flow2, _ = flow_of(repo)
+    fake_analyse(monkeypatch, repo, [flow1, flow2])
+
+    def must_not_drive(side, tree):
+        raise AssertionError("dry-run must not invoke drive")
+    plans = iter([play.Plan(["f"], drive=must_not_drive, plan_lines=lambda: ["PLAN-A"]),
+                 play.Plan(["f"], drive=must_not_drive, plan_lines=lambda: ["PLAN-B"])])
+    monkeypatch.setattr(play, "python_plan", lambda *a: next(plans))
+    assert play.run(args_for(repo, "--dry-run")) == 0
+    out = capsys.readouterr().out
+    assert "PLAN-A\n\nflow 2/2" in out
+    assert out.endswith("PLAN-B\n")
+
+
+def test_run_dry_run_forces_no_build_before_analysing(repo: Path, monkeypatch):
+    seen = {}
+
+    def analyse(args, visit=None):
+        seen["no_build"] = args.no_build
+        return cli.Analysis(repo, changes.Revisions(repo, "HEAD", None), [], [])
+    monkeypatch.setattr(cli, "analyse", analyse)
+    assert play.run(args_for(repo, "--dry-run")) == cli.EXIT_NOTHING
+    assert seen["no_build"] is True
+    assert play.run(args_for(repo)) == cli.EXIT_NOTHING
+    assert seen["no_build"] is False
+
+
+def test_run_dry_run_routes_cpp_flows_to_cpp_plan_with_no_build_forced(repo: Path, monkeypatch, capsys):
+    flow, nodes = flow_of(repo, tests=("tests/test_lib.cpp::t",), language="cpp")
+    ctr = container.Container("img", "/src")
+    fake_analyse(monkeypatch, repo, [flow], language="cpp", ctr=ctr)
+    seen = {}
+
+    def must_not_drive(side, tree):
+        raise AssertionError("dry-run must not invoke drive")
+
+    def cpp_plan(c, client, f, root, base, out_dir, index, timeout, build_timeout, no_build=False, dry_run=False):
+        seen["no_build"] = no_build
+        seen["dry_run"] = dry_run
+        return play.Plan(["lib.cpp:scale"], drive=must_not_drive, plan_lines=lambda: ["head: cc"])
+    monkeypatch.setattr(play, "cpp_plan", cpp_plan)
+    assert play.run(args_for(repo, "--dry-run")) == 0
+    assert seen["no_build"] is True and seen["dry_run"] is True
+    assert "head: cc" in capsys.readouterr().out
+
+
+def test_run_dry_run_on_a_stopped_flow_still_prints_why_it_stopped(repo: Path, monkeypatch, capsys):
+    flow, nodes = flow_of(repo)
+    fake_analyse(monkeypatch, repo, [flow])
+    stopped = play.Plan(["lib.py:scale"], stop="no call site with literal arguments and no covering test")
+    monkeypatch.setattr(play, "python_plan", lambda *a: stopped)
+    assert play.run(args_for(repo, "--dry-run")) == cli.EXIT_NOTHING
+    assert "no call site with literal arguments and no covering test" in capsys.readouterr().out
+
+
+def test_run_dry_run_reports_when_a_runnable_plan_has_no_plan_lines(repo: Path, monkeypatch, capsys):
+    flow, nodes = flow_of(repo)
+    fake_analyse(monkeypatch, repo, [flow])
+
+    def must_not_drive(side, tree):
+        raise AssertionError("dry-run must not invoke drive")
+    bare = play.Plan(["lib.py:scale"], drive=must_not_drive)
+    monkeypatch.setattr(play, "python_plan", lambda *a: bare)
+    assert play.run(args_for(repo, "--dry-run")) == 0
+    assert "nothing to plan for this flow" in capsys.readouterr().out
 
 
 def test_run_prints_the_note_for_test_driven_flows_with_an_entry(repo: Path, monkeypatch, capsys):
@@ -338,12 +608,15 @@ def test_run_routes_cpp_flows_to_cpp_plan_when_a_container_exists(repo: Path, mo
     fake_analyse(monkeypatch, repo, [flow], language="cpp", ctr=ctr)
     seen = {}
 
-    def cpp_plan(c, client, f, root, base, out_dir, index, timeout, build_timeout, no_build=False):
+    def cpp_plan(c, client, f, root, base, out_dir, index, timeout, build_timeout, no_build=False, dry_run=False):
         seen["args"] = (c, root, base, index, timeout, build_timeout)
+        seen["no_build"] = no_build
+        seen["dry_run"] = dry_run
         return written_plan(root, ["lib.cpp:scale", "lib.cpp:clamp"], 1, 2)
     monkeypatch.setattr(play, "cpp_plan", cpp_plan)
     assert play.run(args_for(repo, "--run-timeout", "7", "--build-timeout", "8")) == 0
     assert seen["args"] == (ctr, repo, repo / ".flowdiff" / "base", 1, 7.0, 8.0)
+    assert seen["no_build"] is False and seen["dry_run"] is False
     assert "1 of 1 frames differ: scale (return); origin scale" in capsys.readouterr().out
 
 

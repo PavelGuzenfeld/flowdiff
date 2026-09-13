@@ -316,16 +316,24 @@ def link_failure(source_rel: str, output: str) -> str:
             f"is the way into this entry\n{output}")
 
 
-def link_inputs(ctr: container.Container, tree: Path, entry: dict) -> tuple[list[str], list[str]] | None:
-    """Sibling objects of the entry's target (its own object excluded, the harness includes that TU) and the
-    linker flags for every library the built artefact NEEDs: internal ones by path, external ones by -l (22).
-    Paths are container paths."""
+def siblings_of(ctr: container.Container, tree: Path, entry: dict) -> tuple[list[str], Path, str] | None:
+    """Sibling objects of the entry's target, its own object excluded (the harness includes that TU), as
+    container paths, plus the objects directory and target name."""
     target = target_of(tree, entry, ctr.workdir)
     if target is None:
         return None
     objects, name = target
     own = Path(entry["file"]).name + ".o"
-    siblings = sorted(ctr.path(tree, o) for o in objects.rglob("*.o") if o.name != own)
+    return sorted(ctr.path(tree, o) for o in objects.rglob("*.o") if o.name != own), objects, name
+
+
+def link_inputs(ctr: container.Container, tree: Path, entry: dict) -> tuple[list[str], list[str]] | None:
+    """Sibling objects (see `siblings_of`) and the linker flags for every library the built artefact NEEDs:
+    internal ones by path, external ones by -l (decision 22). Paths are container paths."""
+    found = siblings_of(ctr, tree, entry)
+    if found is None:
+        return None
+    siblings, objects, name = found
     artefact = artefact_of(objects, name)
     if artefact is None:
         return siblings, []
@@ -340,6 +348,23 @@ def link_inputs(ctr: container.Container, tree: Path, entry: dict) -> tuple[list
         else:
             flags.append(f"-l{re.sub(r'^lib|\.so(\.\d+)*$', '', lib)}")
     return siblings, flags + sorted(set(rpaths))
+
+
+def harness_plan(ctr: container.Container, tree: Path, source_rel: str, call: str,
+                 out_dir_rel: str) -> tuple[str, list[list[str]]] | None:
+    """The harness source and its compile and link commands, siblings included but external libraries left
+    out (those come from readelf on the built artefact, decision 22) — the part `build_harness` can plan
+    without running anything."""
+    entry = compile_entry(tree, source_rel, ctr.workdir)
+    if entry is None:
+        return None
+    found = siblings_of(ctr, tree, entry)
+    siblings = found[0] if found is not None else []
+    harness = f"{ctr.workdir}/{out_dir_rel}/harness"
+    compiler = shlex.split(entry["command"])[0] if "command" in entry else (entry.get("arguments") or ["c++"])[0]
+    steps = [[compiler, *borrowed_flags(entry), "-o", f"{harness}.o", "-c", f"{harness}.cpp"],
+             ["c++", f"{harness}.o", *siblings, "-pthread", "-o", harness]]
+    return harness_source(f"{ctr.workdir}/{source_rel}", call), steps
 
 
 def build_harness(ctr: container.Container, tree: Path, source_rel: str, call: str, out_dir_rel: str,

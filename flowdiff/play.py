@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from . import cli, compare, container, env, graph, harness_cpp, harness_py, lsp, render, worktree
+from . import cli, compare, container, env, graph, harness_cpp, harness_py, lsp, render, trace_gdb, worktree
 
 RUN_DIR = "run"
 
@@ -22,10 +22,14 @@ def run_dir(root: Path) -> Path:
     return path
 
 
+def harness_command(interpreter: Path, harness: Path) -> list[str]:
+    return [str(interpreter), str(harness)]
+
+
 def run_harness(interpreter: Path, harness: Path, tree: Path, side: str, out: Path, timeout: float) -> str | None:
     out.unlink(missing_ok=True)
     try:
-        proc = subprocess.run([str(interpreter), str(harness)], cwd=tree, capture_output=True, text=True,
+        proc = subprocess.run(harness_command(interpreter, harness), cwd=tree, capture_output=True, text=True,
                               timeout=timeout, env=env.harness_env(tree, side, out))
     except subprocess.TimeoutExpired:
         return f"{side}: harness timed out after {timeout:.0f}s"
@@ -55,18 +59,24 @@ def node_ids(tree: Path, tests: list[str]) -> list[str]:
     return [t.split("::")[0] if t.endswith("::<module>") else t for t in tests if present(tree, t)]
 
 
+def traced_tests_command(interpreter: Path, tree: Path, tests: list[str], out: Path) -> list[str] | None:
+    ids = node_ids(tree, tests)
+    if not ids:
+        return None
+    # One basetemp for both sides: pytest wipes it per session, so tmp_path values repeat exactly.
+    basetemp = out.parent / "basetemp"
+    return [str(interpreter), "-m", "pytest", "-q", "-p", "no:cacheprovider",
+            "-p", "flowdiff.pytest_tracer", f"--basetemp={basetemp}", *ids]
+
+
 def run_traced_tests(interpreter: Path, tree: Path, tests: list[str], frames: list[str], side: str, out: Path,
                      timeout: float) -> str | None:
     out.unlink(missing_ok=True)
-    ids = node_ids(tree, tests)
-    if not ids:
+    cmd = traced_tests_command(interpreter, tree, tests, out)
+    if cmd is None:
         return f"{side}: none of the covering tests exist on this side"
-    # One basetemp for both sides: pytest wipes it per session, so tmp_path values repeat exactly.
-    basetemp = out.parent / "basetemp"
     try:
-        proc = subprocess.run([str(interpreter), "-m", "pytest", "-q", "-p", "no:cacheprovider",
-                               "-p", "flowdiff.pytest_tracer", f"--basetemp={basetemp}", *ids], cwd=tree,
-                              capture_output=True, text=True, timeout=timeout,
+        proc = subprocess.run(cmd, cwd=tree, capture_output=True, text=True, timeout=timeout,
                               env=env.harness_env(tree, side, out, frames))
     except subprocess.TimeoutExpired:
         return f"{side}: covering tests timed out after {timeout:.0f}s"
@@ -122,6 +132,7 @@ class Plan:
     # A host build stood in for the device (decisions 41, 42); Python has no equivalent today.
     mock: bool = False
     device_libraries: list[str] = field(default_factory=list)
+    plan_lines: Callable[[], list[str]] | None = None
 
 
 def python_plan(client: lsp.LspClient, g: graph.Graph, flow: graph.Flow, root: Path, base: Path, out_dir: Path,
@@ -136,12 +147,18 @@ def python_plan(client: lsp.LspClient, g: graph.Graph, flow: graph.Flow, root: P
     shared, changed_tests = shared_tests(base, root, flow.tests) if flow.tests else ([], [])
     if harness.complete:
         plan.drive = lambda side, tree: run_harness(interpreter, harness_path, tree, side, traces[side], timeout)
+        plan.plan_lines = lambda: [f"{side}: cwd={tree}  {' '.join(harness_command(interpreter, harness_path))}"
+                                   for side, tree in (("base", base), ("head", root))]
     elif shared:
         plan.note = f"driven by {len(shared)} covering test(s) present on both sides"
         if changed_tests:
             plan.warnings.append(f"the driving tests changed in this diff ({', '.join(changed_tests)}); "
                                  "a divergence may reflect the inputs rather than the code")
         plan.drive = lambda side, tree: run_traced_tests(interpreter, tree, shared, frames, side, traces[side], timeout)
+        plan.plan_lines = lambda: [
+            f"{side}: cwd={tree}  {' '.join(cmd)}" if (cmd := traced_tests_command(interpreter, tree, shared, traces[side])) is not None
+            else f"{side}: none of the covering tests exist on this side"
+            for side, tree in (("base", base), ("head", root))]
     else:
         plan.stop = ("no call site with literal arguments and no covering test present on both sides; "
                      f"fill the slots in {harness_path} — harness not run")
@@ -151,7 +168,8 @@ def python_plan(client: lsp.LspClient, g: graph.Graph, flow: graph.Flow, root: P
 
 
 def cpp_plan(ctr: container.Container, client: lsp.LspClient, flow: graph.Flow, root: Path, base: Path,
-             out_dir: Path, index: int, timeout: float, build_timeout: float, no_build: bool = False) -> Plan:
+             out_dir: Path, index: int, timeout: float, build_timeout: float, no_build: bool = False,
+             dry_run: bool = False) -> Plan:
     """A C++ flow is driven by a harness that includes the entry's TU and calls it with literal arguments
     (decisions 20 to 24), else by the built test executables that reach it; either runs under gdb in the
     container."""
@@ -221,13 +239,42 @@ def cpp_plan(ctr: container.Container, client: lsp.LspClient, flow: graph.Flow, 
         plan.note = f"driven by {len(head_exes)} covering test executable(s) under gdb"
     plan.drive = drive
 
+    def plan_lines() -> list[str]:
+        lines = []
+        for side, tree in (("base", base), ("head", root)):
+            steps = container.build_steps(ctr, tree)
+            if isinstance(steps, str):
+                lines.append(f"{side}: {steps}")
+                continue
+            lines += [f"{side}: {' '.join(step)}" for step in steps] or [f"{side}: already configured and built"]
+            if literal is not None:
+                planned = harness_cpp.harness_plan(ctr, tree, entry_rel, call, f".flowdiff/run/harness{index}")
+                if planned is None:
+                    lines.append(f"{side}: {entry_rel} not yet in a compile database; build first to plan the harness")
+                    continue
+                lines.append(f"{side}: harness includes {entry_rel}, calls {call}")
+                lines += [f"{side}: {' '.join(step)}" for step in planned[1]]
+                exe = f"{ctr.workdir}/.flowdiff/run/harness{index}/harness"
+            else:
+                exes = harness_cpp.test_executables(tree, test_files, ctr.workdir)
+                chosen = [exes[f] for f in test_files if f in exes and f in head_exes]
+                if not chosen:
+                    lines.append(f"{side}: no covering test executable found on this side")
+                    continue
+                exe = f"{ctr.workdir}/{chosen[0]}"
+            lines.append(f"{side}: breakpoints on {', '.join(sorted(gdb_frames.values()))}")
+            lines.append(f"{side}: {' '.join(trace_gdb.gdb_command('.flowdiff/run/gdb0.py', exe))}")
+        return lines
+
+    plan.plan_lines = plan_lines
+
     if head_exes:
         def delta() -> list[str]:
             before = harness_cpp.run_executables(ctr, base, list(head_exes.values()), timeout)
             after = harness_cpp.run_executables(ctr, root, list(head_exes.values()), timeout)
             return [f"  {exe}  {before.get(exe, 'ABSENT')}→{after[exe]}" for exe in head_exes.values()]
         plan.delta = delta
-    if head_exes:
+    if head_exes and not dry_run:
         device, variant = harness_cpp.linked_variant(ctr, root, list(head_exes.values()))
         plan.trailer.append(variant)
         plan.device_libraries = device
@@ -238,6 +285,8 @@ def cpp_plan(ctr: container.Container, client: lsp.LspClient, flow: graph.Flow, 
 
 
 def run(args: argparse.Namespace) -> int:
+    if args.dry_run:
+        args.no_build = True
     plans: dict[int, Plan] = {}
     base_holder: list[Path] = []
 
@@ -256,7 +305,7 @@ def run(args: argparse.Namespace) -> int:
                 plans[id(flow)] = python_plan(client, g, flow, root, base_holder[0], out_dir, index, args.run_timeout)
             elif analysis.container is not None:
                 plans[id(flow)] = cpp_plan(analysis.container, client, flow, root, base_holder[0], out_dir, index,
-                                           args.run_timeout, args.build_timeout, args.no_build)
+                                           args.run_timeout, args.build_timeout, args.no_build, args.dry_run)
             else:
                 analysis.warnings.append(f"{flow.language} flows outside a container are analysed only")
 
@@ -289,6 +338,11 @@ def run(args: argparse.Namespace) -> int:
         print(render.render_flow(i, len(shown), flow, args.full, args.list_tests, plan.note))
         if plan.note and flow.entry is not None:
             print(f"no call site with literal arguments; {plan.note}")
+        if args.dry_run:
+            print("\n".join(plan.plan_lines() if plan.plan_lines else ["nothing to plan for this flow"]))
+            if i < len(shown):
+                print()
+            continue
         for side, tree in (("base", base_holder[0]), ("head", root)):
             failure = plan.drive(side, tree)
             if failure:
@@ -317,6 +371,11 @@ def run(args: argparse.Namespace) -> int:
     removed = [f for f in analysis.flows if f.removed_only]
     if removed:
         print("\n" + render.render_removed(removed))
+    if args.dry_run:
+        sys.stdout.flush()
+        for w in analysis.warnings:
+            print(f"warning: {w}", file=sys.stderr)
+        return cli.EXIT_OK
     (out_dir / "index.json").write_text(json.dumps(index))
     worktree.remember_run(analysis.origin or root, root)
     sys.stdout.flush()

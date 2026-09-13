@@ -166,6 +166,29 @@ def test_build_configures_once_then_runs_the_incremental_build(tmp_path: Path, f
     assert [cmd[cmd.index("img") + 1:] for cmd in fake.calls] == [["ninja", "-C", "builddir"]]
 
 
+def test_build_steps_names_the_commands_build_would_run_without_running_them(tmp_path: Path, fake):
+    c = container.Container("img", "/src")
+    assert container.build_steps(c, tmp_path) == f"{tmp_path}: no meson.build, CMakeLists.txt or package.xml; no build system to run"
+    (tmp_path / "meson.build").write_text("")
+    assert container.build_steps(c, tmp_path) == [["meson", "setup", "builddir", "-Dbuildtype=debug"],
+                                                   ["ninja", "-C", "builddir"]]
+    (tmp_path / "builddir").mkdir()
+    (tmp_path / "builddir" / "build.ninja").write_text("")
+    assert container.build_steps(c, tmp_path) == [["ninja", "-C", "builddir"]]
+    assert fake.calls == []
+
+
+def test_build_steps_skips_cmake_configure_once_the_cache_exists(tmp_path: Path, fake):
+    c = container.Container("img", "/src")
+    (tmp_path / "CMakeLists.txt").write_text("")
+    steps = container.build_steps(c, tmp_path)
+    assert steps[0][:4] == ["cmake", "-S", ".", "-B"] and steps[1] == ["cmake", "--build", "builddir"]
+    (tmp_path / "builddir").mkdir()
+    (tmp_path / "builddir" / "CMakeCache.txt").write_text("")
+    assert container.build_steps(c, tmp_path) == [["cmake", "--build", "builddir"]]
+    assert fake.calls == []
+
+
 def test_build_falls_back_to_cmake_and_reports_missing_build_systems(tmp_path: Path, fake):
     c = container.Container("img", "/src")
     assert container.build(c, tmp_path, 10) == f"{tmp_path}: no meson.build, CMakeLists.txt or package.xml; no build system to run"

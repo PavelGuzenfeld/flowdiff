@@ -254,22 +254,28 @@ def packages_of(tree: Path, files: Iterable[Path]) -> tuple[str, ...]:
     return tuple(sorted(names))
 
 
-def build(container: Container, tree: Path, timeout: float) -> str | None:
-    """Configure once, then the project's own incremental build; the error text on failure, else None."""
+def build_steps(container: Container, tree: Path) -> list[list[str]] | str:
+    """The commands `build` would run, in order; the error text instead when there is no build system."""
     build_dir = tree / BUILD_DIR
     system = build_system(tree)
     if system == "meson":
-        steps = ([] if (build_dir / "build.ninja").is_file()
-                 else [["meson", "setup", BUILD_DIR, "-Dbuildtype=debug"]]) + [["ninja", "-C", BUILD_DIR]]
-    elif system == "cmake":
-        steps = ([] if (build_dir / "CMakeCache.txt").is_file()
-                 else [["cmake", "-S", ".", "-B", BUILD_DIR, "-DCMAKE_BUILD_TYPE=Debug",
-                        "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"]]) + [["cmake", "--build", BUILD_DIR]]
-    elif system == "colcon":
+        return ([] if (build_dir / "build.ninja").is_file()
+                else [["meson", "setup", BUILD_DIR, "-Dbuildtype=debug"]]) + [["ninja", "-C", BUILD_DIR]]
+    if system == "cmake":
+        return ([] if (build_dir / "CMakeCache.txt").is_file()
+                else [["cmake", "-S", ".", "-B", BUILD_DIR, "-DCMAKE_BUILD_TYPE=Debug",
+                       "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"]]) + [["cmake", "--build", BUILD_DIR]]
+    if system == "colcon":
         scope = ["--packages-up-to", *container.packages] if container.packages else []
-        steps = [["colcon", "build", "--symlink-install", *scope, "--cmake-args", "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"]]
-    else:
-        return f"{tree}: no meson.build, CMakeLists.txt or package.xml; no build system to run"
+        return [["colcon", "build", "--symlink-install", *scope, "--cmake-args", "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"]]
+    return f"{tree}: no meson.build, CMakeLists.txt or package.xml; no build system to run"
+
+
+def build(container: Container, tree: Path, timeout: float) -> str | None:
+    """Configure once, then the project's own incremental build; the error text on failure, else None."""
+    steps = build_steps(container, tree)
+    if isinstance(steps, str):
+        return steps
     for step in steps:
         try:
             proc = container.run(tree, step, timeout=timeout)

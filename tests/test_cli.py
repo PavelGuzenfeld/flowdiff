@@ -37,7 +37,7 @@ def test_verbs_dispatch_to_play_with_their_own_parsers(monkeypatch):
 def test_play_parser_defaults():
     args = cli.build_play_parser().parse_args([])
     assert (args.depth, args.clean_base, args.fail_on_diff, args.run_timeout) == (0, False, False, 300.0)
-    assert (args.ref, args.hops, args.no_tests) == (None, 3, False)
+    assert (args.ref, args.hops, args.no_tests, args.dry_run) == (None, 3, False, False)
     assert args.fail_on_mock is False
     assert (args.float_tol, args.float_rtol) == (None, None)
 
