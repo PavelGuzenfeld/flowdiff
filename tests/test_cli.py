@@ -60,9 +60,96 @@ def test_missing_tool_is_exit_1(monkeypatch, capsys, repo: Path):
 def test_missing_tool_names_every_absent_binary(monkeypatch, capsys, repo: Path):
     monkeypatch.setattr(cli.shutil, "which", lambda name: None)
     assert cli.main(["--repo", str(repo)]) == 1
-    err = capsys.readouterr().err
-    assert all(binary in err for binary in cli.REQUIRED_BINARIES)
-    assert "apt install libgraph-easy-perl" in err
+    assert capsys.readouterr().err == (
+        "missing tools:\n"
+        "  git: install git via your OS package manager\n"
+        "  ast-grep: cargo install ast-grep or a release binary\n"
+        "  graph-easy: install the Graph::Easy CPAN module, e.g. cpan Graph::Easy\n")
+
+
+def test_missing_tool_names_the_apt_package_when_apt_get_is_present(monkeypatch, capsys, repo: Path):
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/apt-get" if name == "apt-get" else None)
+    assert cli.main(["--repo", str(repo)]) == 1
+    assert capsys.readouterr().err == (
+        "missing tools:\n"
+        "  git: apt install git\n"
+        "  ast-grep: cargo install ast-grep or a release binary\n"
+        "  graph-easy: apt install libgraph-easy-perl\n")
+
+
+def test_missing_tool_names_dnfs_package_when_dnf_is_present(monkeypatch, capsys, repo: Path):
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/dnf" if name == "dnf" else None)
+    assert cli.main(["--repo", str(repo)]) == 1
+    assert capsys.readouterr().err == (
+        "missing tools:\n"
+        "  git: dnf install git\n"
+        "  ast-grep: cargo install ast-grep or a release binary\n"
+        "  graph-easy: dnf install perl-Graph-Easy\n")
+
+
+def test_missing_tool_uses_pacmans_package_and_falls_back_where_pacman_has_none(monkeypatch, capsys, repo: Path):
+    """pacman's table has no ast-grep or graph-easy entry; both must read as the plain fallback, not a
+    shotgunned "pacman ... or ..." hint that would also satisfy a looser, substring-only assertion."""
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/pacman" if name == "pacman" else None)
+    assert cli.main(["--repo", str(repo)]) == 1
+    assert capsys.readouterr().err == (
+        "missing tools:\n"
+        "  git: pacman -S git\n"
+        "  ast-grep: cargo install ast-grep or a release binary\n"
+        "  graph-easy: install the Graph::Easy CPAN module, e.g. cpan Graph::Easy\n")
+
+
+def test_missing_tool_uses_brews_package_and_falls_back_where_brew_has_none(monkeypatch, capsys, repo: Path):
+    """brew's table has no graph-easy entry; git and ast-grep share brew's own package name with the
+    binary, so this is the only check_tools case that can catch a bare "brew install {binary}" guess."""
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/brew" if name == "brew" else None)
+    assert cli.main(["--repo", str(repo)]) == 1
+    assert capsys.readouterr().err == (
+        "missing tools:\n"
+        "  git: brew install git\n"
+        "  ast-grep: brew install ast-grep\n"
+        "  graph-easy: install the Graph::Easy CPAN module, e.g. cpan Graph::Easy\n")
+
+
+def test_install_hint_uses_dnfs_own_package_name_not_apts(monkeypatch):
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/dnf" if name == "dnf" else None)
+    assert cli.install_hint("clangd") == "dnf install clang-tools-extra"
+
+
+def test_install_hint_uses_pacman_when_it_is_the_only_manager_present(monkeypatch):
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/pacman" if name == "pacman" else None)
+    assert cli.install_hint("clangd") == "pacman -S clang"
+
+
+def test_install_hint_uses_brew_when_it_is_the_only_manager_present(monkeypatch):
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/brew" if name == "brew" else None)
+    assert cli.install_hint("ast-grep") == "brew install ast-grep"
+
+
+def test_install_hint_uses_brews_own_package_name_where_it_differs_from_the_binary(monkeypatch):
+    """ast-grep's brew package happens to share its name with the binary; clangd's (llvm) does not, so
+    only this case can tell a real brew table lookup apart from an f"brew install {binary}" guess."""
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/brew" if name == "brew" else None)
+    assert cli.install_hint("clangd") == "brew install llvm"
+
+
+def test_install_hint_prefers_the_first_matching_manager_when_several_are_present(monkeypatch):
+    """apt and brew both know clangd's package name; MANAGERS lists apt first, so it must win rather
+    than whichever the interpreter happens to iterate to, or the hint would be nondeterministic."""
+    monkeypatch.setattr(cli.shutil, "which", lambda name: f"/usr/bin/{name}" if name in ("apt-get", "brew") else None)
+    assert cli.install_hint("clangd") == "apt install clangd"
+
+
+def test_install_hint_falls_back_when_the_detected_manager_has_no_package_for_this_binary(monkeypatch):
+    """pacman's entry carries no ast-grep package; a manager being present must not mask the one
+    binary it has nothing to offer for, the way an unconditional per-manager lookup would."""
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/pacman" if name == "pacman" else None)
+    assert cli.install_hint("ast-grep") == "cargo install ast-grep or a release binary"
+
+
+def test_install_hint_falls_back_when_no_package_manager_is_detected(monkeypatch):
+    monkeypatch.setattr(cli.shutil, "which", lambda name: None)
+    assert cli.install_hint("pyright-langserver") == "npm install -g pyright"
 
 
 def test_not_a_repo_is_exit_1(tools_present, tmp_path: Path, capsys):
@@ -120,8 +207,35 @@ def test_missing_language_server_is_exit_1(monkeypatch, repo: Path, capsys):
     monkeypatch.setattr(cli.shutil, "which", lambda name: None if name == "pyright-langserver" else "/usr/bin/x")
     (repo / "a.py").write_text(SOURCE.replace("x + 1", "x + 2"))
     assert cli.main(["--repo", str(repo)]) == 1
-    err = capsys.readouterr().err
-    assert "pyright-langserver" in err and "npm install -g pyright" in err
+    assert capsys.readouterr().err == "missing language servers:\n  pyright-langserver: npm install -g pyright\n"
+
+
+def test_missing_language_server_names_the_hosts_package_when_one_is_known(monkeypatch, repo: Path, capsys):
+    """clangd has a per-manager package name (unlike pyright-langserver, always npm); this is the only
+    proof that the language-server check routes through install_hint rather than a fixed npm-style hint."""
+    from flowdiff import container
+    (repo / "a.cpp").write_text("int f(int x) {\n    return x + 1;\n}\n")
+    git(repo, "add", "a.cpp")
+    git(repo, "commit", "-q", "-m", "cpp")
+    (repo / "a.cpp").write_text("int f(int x) {\n    return x + 2;\n}\n")
+    monkeypatch.setattr(container, "detect", lambda root, image: None)
+    monkeypatch.setattr(cli.shutil, "which",
+                        lambda name: "/usr/bin/dnf" if name == "dnf" else (None if name in ("clangd", "apt-get") else "/usr/bin/x"))
+    assert cli.main(["--repo", str(repo)]) == 1
+    assert capsys.readouterr().err == "missing language servers:\n  clangd: dnf install clang-tools-extra\n"
+
+
+def test_missing_language_server_falls_back_when_no_package_manager_is_detected(monkeypatch, repo: Path, capsys):
+    from flowdiff import container
+    (repo / "a.cpp").write_text("int f(int x) {\n    return x + 1;\n}\n")
+    git(repo, "add", "a.cpp")
+    git(repo, "commit", "-q", "-m", "cpp")
+    (repo / "a.cpp").write_text("int f(int x) {\n    return x + 2;\n}\n")
+    monkeypatch.setattr(container, "detect", lambda root, image: None)
+    absent = {"clangd", "apt-get", "dnf", "pacman", "brew"}
+    monkeypatch.setattr(cli.shutil, "which", lambda name: None if name in absent else "/usr/bin/x")
+    assert cli.main(["--repo", str(repo)]) == 1
+    assert capsys.readouterr().err == "missing language servers:\n  clangd: install clangd (part of LLVM)\n"
 
 
 def test_parser_defaults():

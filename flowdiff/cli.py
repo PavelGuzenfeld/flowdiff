@@ -15,10 +15,29 @@ from typing import Callable
 from . import changes, container, graph, harness_cpp, lsp, render, worktree
 
 EXIT_OK, EXIT_TOOL_ERROR, EXIT_NOTHING, EXIT_DIFF = 0, 1, 2, 3
-REQUIRED_BINARIES = {"git": "apt install git", "ast-grep": "cargo install ast-grep or a release binary",
-                     "graph-easy": "apt install libgraph-easy-perl"}
-SERVER_HINTS = {"clangd": "apt install clangd", "pyright-langserver": "npm install -g pyright"}
+REQUIRED_BINARIES = ("git", "ast-grep", "graph-easy")
+# Detection binary, install command template, and this manager's package name for each tool we might
+# ask about; a manager present but silent on a tool falls through to FALLBACK_HINTS below.
+MANAGERS: list[tuple[str, str, dict[str, str]]] = [
+    ("apt-get", "apt install {}", {"git": "git", "graph-easy": "libgraph-easy-perl", "clangd": "clangd"}),
+    ("dnf", "dnf install {}", {"git": "git", "graph-easy": "perl-Graph-Easy", "clangd": "clang-tools-extra"}),
+    ("pacman", "pacman -S {}", {"git": "git", "clangd": "clang"}),
+    ("brew", "brew install {}", {"git": "git", "ast-grep": "ast-grep", "clangd": "llvm"}),
+]
+FALLBACK_HINTS = {"git": "install git via your OS package manager", "clangd": "install clangd (part of LLVM)",
+                 "graph-easy": "install the Graph::Easy CPAN module, e.g. cpan Graph::Easy",
+                 "ast-grep": "cargo install ast-grep or a release binary",
+                 "pyright-langserver": "npm install -g pyright"}
 VERBS = ("play", "show", "keep")
+
+
+def install_hint(binary: str) -> str:
+    """The exact command for the host's package manager; a manager-agnostic fallback when none is
+    detected or the detected one has no package name on file for this binary (decision: #48)."""
+    for detect, template, packages in MANAGERS:
+        if shutil.which(detect) is not None and binary in packages:
+            return template.format(packages[binary])
+    return FALLBACK_HINTS[binary]
 
 
 @dataclass
@@ -90,7 +109,7 @@ def build_keep_parser() -> argparse.ArgumentParser:
 
 
 def check_tools() -> int:
-    missing = [f"{b}: {hint}" for b, hint in REQUIRED_BINARIES.items() if shutil.which(b) is None]
+    missing = [f"{b}: {install_hint(b)}" for b in REQUIRED_BINARIES if shutil.which(b) is None]
     if missing:
         print("missing tools:\n  " + "\n  ".join(missing), file=sys.stderr)
         return EXIT_TOOL_ERROR
@@ -190,7 +209,7 @@ def analyse(args: argparse.Namespace, visit: Visitor | None = None) -> Analysis 
         print("only test files changed" if not source_hunks else "no changed files in a supported language")
         return EXIT_NOTHING
 
-    unavailable = [f"{c.binary}: {SERVER_HINTS[c.binary]}" for c in by_server
+    unavailable = [f"{c.binary}: {install_hint(c.binary)}" for c in by_server
                    if not c.command_prefix and shutil.which(c.binary) is None]
     if unavailable:
         print("missing language servers:\n  " + "\n  ".join(unavailable), file=sys.stderr)
