@@ -13,6 +13,7 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-cov", "mutmut==2.5.1", "ast-grep-cli", "pyright"]
+release = ["build", "twine"]
 
 [project.scripts]
 flowdiff = "flowdiff.cli:main"
