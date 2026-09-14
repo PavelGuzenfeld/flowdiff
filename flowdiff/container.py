@@ -20,9 +20,12 @@ LAYER_LABEL = "flowdiff.base"
 CLANGD_VERSION = "20"
 # apt.llvm.org's "20" suite is a single rolling build per codename, replaced without notice, so an
 # unpinned install gives two machines building on different days two different binaries. Observed
-# 2026-09-13 for ubuntu noble; a base whose codename serves a different exact build falls through to
-# the unpinned attempt just below, then to the distribution clangd, same as before this was pinned.
+# 2026-09-13 for ubuntu noble; a codename with no verified pin below falls through to the unpinned
+# attempt, then to the distribution clangd, same as before any codename was pinned (issue #65).
 CLANGD_PIN = "1:20.1.8~++20250804090239+87f0227cb601-1~exp1~20250804210352.139"
+# Verified 2026-09-14 against apt.llvm.org's llvm-toolchain-jammy-20 index; re-verify before trusting
+# this on a new codename or after CLANGD_VERSION moves, the same way CLANGD_PIN itself needs re-pinning.
+CLANGD_PIN_JAMMY = "1:20.1.8~++20250708082409+6fb913d3e2ec-1~exp1~20250708202428.132"
 LAYER_DOCKERFILE = """\
 FROM {base}
 RUN apt-get update && apt-get install -y --no-install-recommends gdb clangd binutils \\
@@ -31,13 +34,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends gdb clangd binu
         && echo "deb http://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs)-{llvm} main" \\
              > /etc/apt/sources.list.d/llvm.list \\
         && apt-get update \\
-        && (apt-get install -y --no-install-recommends clangd-{llvm}={pin} \\
-            || apt-get install -y --no-install-recommends clangd-{llvm}) \\
+        && (case "$(lsb_release -cs)" in \\
+        {pin_arms} \\
+        *) false ;; \\
+        esac \\
+            || (echo "flowdiff: no verified apt.llvm.org pin for $(lsb_release -cs); using today's build" \\
+                && apt-get install -y --no-install-recommends clangd-{llvm})) \\
         && ln -sf /usr/bin/clangd-{llvm} /usr/bin/clangd \\
         || echo "flowdiff: no apt.llvm.org clangd-{llvm} for this base; keeping the distribution one") \\
     && rm -rf /var/lib/apt/lists/*
 LABEL {label}={digest}
 """
+
+
+def clangd_pins() -> dict[str, str]:
+    """Codename -> verified apt.llvm.org pin; read fresh so a test can monkeypatch either constant."""
+    return {"noble": CLANGD_PIN, "jammy": CLANGD_PIN_JAMMY}
+
+
+def pin_arms(llvm: str, pins: dict[str, str]) -> str:
+    """One `case` arm per verified codename, each a literal, greppable install line."""
+    return " \\\n        ".join(
+        f'{codename}) apt-get install -y --no-install-recommends clangd-{llvm}={pin} ;;'
+        for codename, pin in pins.items())
 BUILD_DIR = "builddir"
 COLCON_BUILD_DIR = "build"
 DEVICE_LIBS = ("libnvbufsurface", "libcuda", "libcudart", "libnvinfer")
@@ -73,14 +92,16 @@ def project_image(root: Path, explicit: str | None) -> str | None:
 
 def layer_recipe(base: str, digest: str) -> str:
     return LAYER_DOCKERFILE.format(base=base, label=LAYER_LABEL, digest=layer_key(digest),
-                                   llvm=CLANGD_VERSION, pin=CLANGD_PIN)
+                                   llvm=CLANGD_VERSION, pin_arms=pin_arms(CLANGD_VERSION, clangd_pins()))
 
 
 def layer_key(digest: str) -> str:
-    """The layer is the base image and this recipe with its clangd version and pin substituted in, so a
-    changed recipe, version or pin must rebuild as a changed base does. {base}/{label}/{digest} are left
-    as literal placeholder text (not .format()'d) so this cannot loop back on the digest it is computing."""
-    substituted = LAYER_DOCKERFILE.replace("{llvm}", CLANGD_VERSION).replace("{pin}", CLANGD_PIN)
+    """The layer is the base image and this recipe with its clangd version and pins substituted in, so a
+    changed recipe, version or any codename's pin must rebuild as a changed base does. {base}/{label}/
+    {digest} are left as literal placeholder text (not .format()'d) so this cannot loop back on the
+    digest it is computing."""
+    substituted = LAYER_DOCKERFILE.replace("{llvm}", CLANGD_VERSION) \
+        .replace("{pin_arms}", pin_arms(CLANGD_VERSION, clangd_pins()))
     return f"{digest}+{hashlib.sha256(substituted.encode()).hexdigest()[:12]}"
 
 
