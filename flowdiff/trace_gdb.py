@@ -40,6 +40,17 @@ def type_name(t):
     return str(t.strip_typedefs()) if t.name is None else t.name
 
 
+def bind_type(t):
+    """The declared scalar type behind a reference parameter (issue #53's long&/float&); only a
+    reference ever reaches keep.py's binds, since a pointer's pointee never collapses to a bare literal."""
+    if t.strip_typedefs().code not in (gdb.TYPE_CODE_REF, getattr(gdb, "TYPE_CODE_RVALUE_REF", -1)):
+        return None
+    target = t.strip_typedefs().target()
+    if target.strip_typedefs().code in (gdb.TYPE_CODE_BOOL, gdb.TYPE_CODE_INT, gdb.TYPE_CODE_CHAR, gdb.TYPE_CODE_FLT):
+        return type_name(target)
+    return None
+
+
 def summarise(v, depth=0):
     try:
         t = v.type.strip_typedefs()
@@ -141,6 +152,7 @@ class Enter(gdb.Breakpoint):
     def stop(self):
         frame = gdb.selected_frame()
         args = {}
+        arg_types = {}
         watched = {}
         try:
             block = frame.block()
@@ -151,12 +163,18 @@ class Enter(gdb.Breakpoint):
                     if sym.is_argument:
                         value = sym.value(frame)
                         args[sym.name] = summarise(value)
+                        bt = bind_type(sym.type)
+                        if bt is not None:
+                            arg_types[sym.name] = bt
                         target = watch_target(value)
                         if target is not None:
                             watched[sym.name] = target
         except Exception as exc:
             args["<unreadable>"] = str(exc)[:80]
-        record("enter", self.key, {"args": args})
+        payload = {"args": args}
+        if arg_types:
+            payload["arg_types"] = arg_types
+        record("enter", self.key, payload)
         try:
             Exit(frame, self.key, watched)
         except Exception:

@@ -260,10 +260,21 @@ def test_a_mutated_scalar_reference_is_bound_and_asserted_in_cpp():
     call = compare.Call(1, {"v": 4, "n": 2}, 8, end=2, after={"v": 7})
     found, unpinned = keep.cpp_cases("ns::scale", [call])
     assert unpinned == []
-    assert found == [keep.Case("ns::scale(v, 2)", (("v", "4"),), (("result", "8", True), ("v", "7", True)))]
+    assert found == [keep.Case("ns::scale(v, 2)", (("v", "4"),), (("result", "8", True), ("v", "7", True)),
+                               (None,))]
     text = keep.emit_cpp("f.hpp", "ns::scale", found, "harness", '#include "test_harness.h"')
     assert ("TEST(flow_scale_1) {\n    auto v = 4;\n    auto result = ns::scale(v, 2);\n"
             "    ASSERT_EQ(result, 8);\n    ASSERT_EQ(v, 7);\n}") in text
+
+
+def test_a_mutated_long_argument_is_bound_with_its_declared_type_not_auto():
+    """A bare `4` deduces int under auto; long v = 4 does not compile as an int (issue #53)."""
+    call = compare.Call(1, {"v": 4}, 0, end=2, after={"v": 7}, arg_types={"v": "long"})
+    found, unpinned = keep.cpp_cases("ns::grow", [call])
+    assert unpinned == []
+    text = keep.emit_cpp("f.hpp", "ns::grow", found, "harness", '#include "test_harness.h"')
+    assert "    long v = 4;\n" in text
+    assert "    auto v = 4;\n" not in text
 
 
 def test_a_mutated_cpp_argument_that_is_not_scalar_is_named_instead():

@@ -28,6 +28,8 @@ class Call:
     # Watched arguments summarised again at exit; only a caller-visible mutation makes one differ.
     after: dict[str, Any] = field(default_factory=dict)
     thread: int | None = None
+    # A scalar argument's declared C++ type (issue #53); gdb only, empty from the Python tracer.
+    arg_types: dict[str, str] = field(default_factory=dict)
 
     def mutated(self) -> dict[str, Any]:
         return {n: v for n, v in self.after.items() if n in self.args and v != self.args[n]}
@@ -54,7 +56,8 @@ def load(path: Path) -> dict[str, list[Call]]:
         rec = json.loads(line)
         frame = rec["frame"]
         if rec["event"] == "enter":
-            call = Call(rec["seq"], rec.get("args", {}), test=rec.get("test"), thread=rec.get("thread"))
+            call = Call(rec["seq"], rec.get("args", {}), test=rec.get("test"), thread=rec.get("thread"),
+                        arg_types=rec.get("arg_types", {}))
             calls.setdefault(frame, []).append(call)
             open_calls.setdefault(frame, []).append(call)
         elif open_calls.get(frame):
