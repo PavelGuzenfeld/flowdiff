@@ -39,12 +39,20 @@ void resize(Box* b, int w) { b->width = w; }
 
 int peek(int v) { return v; }
 
+long grow_long(long& v, int by) { v += by; return v; }
+
+float scale_up(float& v, float by) { v *= by; return v; }
+
 int main() {
     int n = 4;
     grow(n, 3);
     Box b{1, 2};
     resize(&b, 9);
     peek(7);
+    long m = 4;
+    grow_long(m, 3);
+    float f = 2.0f;
+    scale_up(f, 1.5f);
     return 0;
 }
 """
@@ -84,3 +92,16 @@ def test_a_pointer_argument_is_recorded_through_the_pointer(tmp_path: Path):
 def test_a_by_value_argument_is_not_watched(tmp_path: Path):
     recs = traced(tmp_path, {"t.cpp:peek": "peek"})
     assert recs[0]["args"] == {"v": 7} and "after" not in recs[1]
+
+
+@gdb_and_gpp
+def test_a_mutated_long_reference_reports_its_declared_type_not_int(tmp_path: Path):
+    """keep.py binds this before-value with auto if arg_types is wrong or missing (issue #53)."""
+    recs = traced(tmp_path, {"t.cpp:grow_long": "grow_long"})
+    assert recs[0]["arg_types"] == {"v": "long"}
+
+
+@gdb_and_gpp
+def test_a_mutated_float_reference_reports_its_declared_type(tmp_path: Path):
+    recs = traced(tmp_path, {"t.cpp:scale_up": "scale_up"})
+    assert recs[0]["arg_types"] == {"v": "float"}
