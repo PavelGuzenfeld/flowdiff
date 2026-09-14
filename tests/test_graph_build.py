@@ -132,6 +132,21 @@ def test_textual_callees_fill_in_when_outgoing_calls_are_unsupported(tmp_path: P
     assert not any(e.src == crop.id for e in g.edges)
 
 
+@pytest.mark.skipif(shutil.which("ast-grep") is None, reason="ast-grep not installed")
+def test_textual_callees_fill_in_for_typescript_too(tmp_path: Path):
+    source = tmp_path / "src" / "t.ts"
+    source.parent.mkdir()
+    source.write_text("function helper(x: number): number { return x; }\n"
+                      "function run(v: number): number {\n    return helper(v);\n}\n")
+    run = symbol("run", source, 1, last=3, kind=12)
+    helper = symbol("helper", source, 0, last=0)
+    syms = {"run": run, "helper": helper}
+    client = FakeClient(tmp_path, syms, {}, language="typescript")
+    client.unsupported.add("callHierarchy/outgoingCalls")
+    g = graph.build_graph(client, changed(syms, ("run", "body")), hops=3)
+    assert {g.nodes[e.dst].name for e in g.edges if e.src == run.id} == {"helper"}
+
+
 def test_build_graph_tolerates_a_symbol_with_no_hierarchy(tmp_path: Path):
     syms = {"ghost": symbol("ghost", tmp_path / "other.py", 99)}
     client = FakeClient(tmp_path, {}, {})

@@ -112,6 +112,7 @@ class ServerConfig:
 
 CPP_EXTENSIONS = frozenset({".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".cu"})
 PYTHON_EXTENSIONS = frozenset({".py"})
+TYPESCRIPT_EXTENSIONS = frozenset({".ts", ".tsx"})
 
 
 def find_compile_db(root: Path) -> Path | None:
@@ -135,6 +136,11 @@ def server_for(path: Path, root: Path, container: Any = None) -> ServerConfig | 
                             references_need_open=True,
                             import_kinds=("import_statement", "import_from_statement"),
                             test_function_prefix="test")
+    if suffix in TYPESCRIPT_EXTENSIONS:
+        # vitest/jest tests are anonymous callbacks passed to test()/it(), so there is no named-function
+        # prefix to match; covering_tests() already falls back to <module> granularity without one.
+        return ServerConfig("typescript", "typescript-language-server", ("--stdio",), TYPESCRIPT_EXTENSIONS,
+                            "typescript", import_kinds=("import_statement",))
     return None
 
 
