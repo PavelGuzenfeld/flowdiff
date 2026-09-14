@@ -127,6 +127,6 @@ is recorded again at exit, so `keep` can assert what changed as well as what cam
 
 ## Design
 
-Goal, non-goals and all 54 decisions are recorded in issue #7; open questions, risks and rejected
+Goal, non-goals and all 55 decisions are recorded in issue #7; open questions, risks and rejected
 alternatives in #8. Both are closed now that the design is fully implemented; reopen either to record
 a new decision or question.
