@@ -20,6 +20,19 @@ RUN_DIR = "run"
 MAX_CASES = 12
 TEST_DIR_PRIORITY = ("tests", "test", "spec", "specs")
 
+# C++20 keywords (cppreference), for bindable() on the C++ path - Python's own keyword.kwlist is the
+# wrong guard there (issue #54): neither list is a subset of the other (e.g. "template", "not").
+CPP_KEYWORDS = frozenset("""
+    alignas alignof and and_eq asm auto bitand bitor bool break case catch char char8_t char16_t
+    char32_t class compl concept const consteval constexpr constinit const_cast continue co_await
+    co_return co_yield decltype default delete do double dynamic_cast else enum explicit export
+    extern false float for friend goto if inline int long mutable namespace new noexcept not not_eq
+    nullptr operator or or_eq private protected public register reinterpret_cast requires return
+    short signed sizeof static static_assert static_cast struct switch template this thread_local
+    throw true try typedef typeid typename union unsigned using virtual void volatile wchar_t while
+    xor xor_eq
+""".split())
+
 
 def detect_dialect(test_dir: Path) -> str:
     """pytest, then unittest, then plain asserts (decision 48). A module-level test_ function is pytest's mark;
@@ -79,9 +92,9 @@ class Case:
     bind_types: tuple[str | None, ...] = ()
 
 
-def bindable(module: str, arg: str) -> bool:
+def bindable(module: str, arg: str, keywords: frozenset[str] = frozenset(keyword.kwlist)) -> bool:
     """A mutated argument can only be asserted through a name the emitted test can safely introduce."""
-    return arg.isidentifier() and not keyword.iskeyword(arg) and arg not in ("result", module.split(".")[0])
+    return arg.isidentifier() and arg not in keywords and arg not in ("result", module.split(".")[0])
 
 
 def case_of(module: str, name: str, call: compare.Call) -> tuple[Case | None, list[str]]:
@@ -199,7 +212,7 @@ def cpp_cases(name: str, calls: list[compare.Call]) -> tuple[list[Case], list[st
         binds, pins = [], []
         for arg, after in mutated.items():
             before, expected = cpp_literal(call.args[arg]), cpp_literal(after)
-            if not bindable(name, arg) or before is None or expected is None:
+            if not bindable(name, arg, CPP_KEYWORDS) or before is None or expected is None:
                 if arg not in unpinned:
                     unpinned.append(arg)
                 continue

@@ -277,6 +277,29 @@ def test_a_mutated_long_argument_is_bound_with_its_declared_type_not_auto():
     assert "    auto v = 4;\n" not in text
 
 
+def test_a_before_value_that_cannot_be_a_cpp_literal_is_unpinned_even_when_the_after_value_can():
+    """Only the before literal is unrenderable here; either half failing must still refuse the bind."""
+    call = compare.Call(1, {"v": {"type": "Obj", "fields": {}}}, 8, end=2, after={"v": 4})
+    found, unpinned = keep.cpp_cases("ns::f", [call])
+    assert unpinned == ["v"] and found == []
+
+
+def test_bindable_rejects_a_cpp_keyword_that_python_would_allow():
+    """"template" is not a Python keyword but is reserved in C++ (issue #54)."""
+    assert not keep.bindable("ns::scale", "template", keep.CPP_KEYWORDS)
+
+
+def test_bindable_accepts_a_python_keyword_that_is_a_valid_cpp_identifier():
+    """"lambda" is a Python keyword but a perfectly ordinary C++ parameter name (issue #54)."""
+    assert keep.bindable("ns::scale", "lambda", keep.CPP_KEYWORDS)
+
+
+def test_a_cpp_keyword_argument_is_reported_unpinned_instead_of_bound():
+    call = compare.Call(1, {"template": 4}, 8, end=2, after={"template": 7})
+    found, unpinned = keep.cpp_cases("ns::scale", [call])
+    assert unpinned == ["template"]
+
+
 def test_a_mutated_cpp_argument_that_is_not_scalar_is_named_instead():
     call = compare.Call(1, {"out": {"type": "R", "fields": {"ok": False}}}, 0, end=2,
                         after={"out": {"type": "R", "fields": {"ok": True}}})
