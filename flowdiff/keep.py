@@ -75,6 +75,8 @@ class Case:
     call: str
     binds: tuple[tuple[str, str], ...] = ()
     checks: tuple[tuple[str, str, bool], ...] = ()
+    # The C++ emitter's own declared type per bind (issue #53); unused and empty on the Python path.
+    bind_types: tuple[str | None, ...] = ()
 
 
 def bindable(module: str, arg: str) -> bool:
@@ -210,7 +212,8 @@ def cpp_cases(name: str, calls: list[compare.Call]) -> tuple[list[Case], list[st
         checks = [(c, lit, True) for c, lit in cpp_return_checks(call.result)]
         if not checks:
             continue
-        case = Case(source, tuple(binds), (*checks, *pins))
+        bind_types = tuple(call.arg_types.get(arg) for arg, _ in binds)
+        case = Case(source, tuple(binds), (*checks, *pins), bind_types)
         if case not in out:
             out.append(case)
     return out[:MAX_CASES], unpinned
@@ -232,7 +235,9 @@ def emit_cpp(source_include: str, name: str, found: list[Case], dialect: str, in
              "doctest": "CHECK({a} == {b});"}.get(dialect, "assert({a} == {b});")
     for i, found_case in enumerate(found, 1):
         case = f"flow_{short}_{i}"
-        body = [f"    auto {n} = {v};" for n, v in found_case.binds] + [f"    auto result = {found_case.call};"] \
+        types = found_case.bind_types or (None,) * len(found_case.binds)
+        body = [f"    {t or 'auto'} {n} = {v};" for (n, v), t in zip(found_case.binds, types)] \
+            + [f"    auto result = {found_case.call};"] \
             + [f"    {check.format(a=subject, b=lit)}" for subject, lit, _ in found_case.checks]
         if macro:
             lines += [macro.format(n=case) + " {", *body, "}", ""]

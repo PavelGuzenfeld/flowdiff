@@ -141,6 +141,7 @@ class Enter(gdb.Breakpoint):
     def stop(self):
         frame = gdb.selected_frame()
         args = {}
+        arg_types = {}
         watched = {}
         try:
             block = frame.block()
@@ -151,12 +152,20 @@ class Enter(gdb.Breakpoint):
                     if sym.is_argument:
                         value = sym.value(frame)
                         args[sym.name] = summarise(value)
+                        # A bare scalar loses its C++ spelling on the way to JSON (issue #53); keep it
+                        # so keep.py can bind it back with its own declared type instead of guessing auto.
+                        if sym.type.strip_typedefs().code in (gdb.TYPE_CODE_BOOL, gdb.TYPE_CODE_INT,
+                                                               gdb.TYPE_CODE_CHAR, gdb.TYPE_CODE_FLT):
+                            arg_types[sym.name] = type_name(sym.type)
                         target = watch_target(value)
                         if target is not None:
                             watched[sym.name] = target
         except Exception as exc:
             args["<unreadable>"] = str(exc)[:80]
-        record("enter", self.key, {"args": args})
+        payload = {"args": args}
+        if arg_types:
+            payload["arg_types"] = arg_types
+        record("enter", self.key, payload)
         try:
             Exit(frame, self.key, watched)
         except Exception:
