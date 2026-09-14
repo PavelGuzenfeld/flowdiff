@@ -123,6 +123,27 @@ def test_the_layer_tries_the_pin_then_unpinned_then_the_distribution_clangd_in_t
     assert pinned < unpinned < distro
 
 
+def test_a_second_codename_gets_its_own_verified_pin_tried_before_jammys_falls_through(monkeypatch):
+    """jammy's build differs from noble's (issue #65); each codename needs its own literal pin, not
+    noble's reused under a different name."""
+    monkeypatch.setattr(container, "CLANGD_PIN_JAMMY", "1:20.1.8-1~exp1~jammy")
+    text = container.layer_recipe("proj:dev", "sha256:x")
+    assert "jammy) apt-get install -y --no-install-recommends clangd-20=1:20.1.8-1~exp1~jammy ;;" in text
+
+
+def test_an_unrecognised_codename_logs_that_it_is_falling_back_instead_of_failing_silently():
+    """The pin exists to avoid "whatever apt serves today" silently returning (issue #65's own
+    framing); a codename outside the table must say so, not just quietly degrade."""
+    text = container.layer_recipe("proj:dev", "sha256:x")
+    assert 'no verified apt.llvm.org pin for $(lsb_release -cs); using today' in text
+
+
+def test_a_changed_jammy_pin_rebuilds_as_a_changed_recipe_does(monkeypatch):
+    before = container.layer_key("sha256:x")
+    monkeypatch.setattr(container, "CLANGD_PIN_JAMMY", "1:99.0.0-1~exp1")
+    assert container.layer_key("sha256:x") != before
+
+
 def test_a_changed_clangd_version_rebuilds_as_a_changed_recipe_does(monkeypatch):
     """layer_key used to hash the raw, un-substituted template: bumping CLANGD_VERSION left the key
     unchanged, so a stale cached layer with the old clangd would keep being reused as "up to date"."""
