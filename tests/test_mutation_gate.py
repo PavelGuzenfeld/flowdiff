@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from tools.mutation_gate import SCORE_EXEMPT, Result
+from tools.mutation_gate import tests_for as _tests_for
 
 
 def result(module: str, killed: int, survived: int) -> Result:
@@ -33,3 +34,9 @@ def test_exempt_line_reports_the_measured_score_beside_the_verdict() -> None:
 
 def test_every_exempt_module_still_exists() -> None:
     assert all(Path(module).is_file() for module in SCORE_EXEMPT)
+
+
+def test_the_real_subprocess_integration_file_sorts_after_play_s_other_test_files() -> None:
+    """-x must exhaust test_play_plans.py before it ever pays for test_play_integration.py."""
+    files = _tests_for("flowdiff/play.py").split()
+    assert files.index("tests/test_play_integration.py") == len(files) - 1
