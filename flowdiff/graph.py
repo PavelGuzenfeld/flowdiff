@@ -172,7 +172,7 @@ def add_hint_edges(client: LspClient, g: Graph) -> None:
                         g.edges.add(Edge(slot_node.id, target.id, "registered"))
 
 
-CALL_KINDS = {"cpp": ("call_expression",), "python": ("call",)}
+CALL_KINDS = {"cpp": ("call_expression",), "python": ("call",), "typescript": ("call_expression",)}
 
 
 def add_textual_callees(client: LspClient, g: Graph, changed: list[ChangedSymbol]) -> None:

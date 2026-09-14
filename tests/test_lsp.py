@@ -353,6 +353,9 @@ def test_server_for_by_extension(tmp_path: Path, monkeypatch):
     assert cpp and f"--compile-commands-dir={tmp_path / 'build'}" in cpp.command
     py = lsp.server_for(Path("x.py"), tmp_path)
     assert py and py.command == ["pyright-langserver", "--stdio"]
+    ts = lsp.server_for(Path("x.ts"), tmp_path)
+    assert ts and ts.command == ["typescript-language-server", "--stdio"]
+    assert lsp.server_for(Path("x.tsx"), tmp_path) is not None
     assert lsp.server_for(Path("x.rs"), tmp_path) is None
 
 
@@ -365,6 +368,9 @@ def test_pyright_needs_documents_open_for_references_and_clangd_does_not(tmp_pat
     assert py.test_function_prefix == "test"
     assert cpp and cpp.references_need_open is False and cpp.import_kinds == ()
     assert cpp.test_function_prefix is None
+    ts = lsp.server_for(Path("x.ts"), tmp_path)
+    assert ts and ts.references_need_open is False
+    assert ts.import_kinds == ("import_statement",) and ts.test_function_prefix is None
 
 
 def test_flatten_marks_functions_inside_functions_as_nested_but_not_methods():
