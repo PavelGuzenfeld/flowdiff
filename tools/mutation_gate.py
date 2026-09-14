@@ -25,9 +25,11 @@ def touched_modules(base: str) -> list[str]:
 
 
 def tests_for(module: str) -> str:
-    """A module's own test files, so a mutant does not pay for the whole suite."""
+    """A module's own test files, cheap ones first so -x kills a mutant before it
+    pays for a real subprocess/pyright integration file (play.py's 51-minute mutmut run)."""
     stem = Path(module).stem
-    matches = sorted(str(p) for p in Path("tests").glob(f"test_{stem}*.py"))
+    matches = sorted((str(p) for p in Path("tests").glob(f"test_{stem}*.py")),
+                     key=lambda p: ("integration" in p, p))
     return " ".join(matches) if matches else "tests"
 
 
