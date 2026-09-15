@@ -1,10 +1,13 @@
-"""JSON-RPC client for clangd and pyright over stdio, covering the six requests flowdiff uses."""
+"""JSON-RPC client for clangd, pyright and typescript-language-server over stdio, and Godot's LSP over
+TCP, covering the six requests flowdiff uses."""
 from __future__ import annotations
 
 import json
 import shutil
+import socket
 import subprocess
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -98,6 +101,10 @@ class ServerConfig:
     # from the host root to the mount point on the way out and back on the way in.
     command_prefix: tuple[str, ...] = ()
     uri_map: tuple[str, str] | None = None
+    # Godot's LSP has no stdio mode (issue #46): the command is still spawned, but frames are read and
+    # written over a TCP connection to tcp_port instead of the process's own stdin/stdout.
+    transport: str = "stdio"
+    tcp_port: int = 0
 
     @property
     def command(self) -> list[str]:
@@ -113,11 +120,18 @@ class ServerConfig:
 CPP_EXTENSIONS = frozenset({".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".cu"})
 PYTHON_EXTENSIONS = frozenset({".py"})
 TYPESCRIPT_EXTENSIONS = frozenset({".ts", ".tsx"})
+GDSCRIPT_EXTENSIONS = frozenset({".gd"})
 
 
 def find_compile_db(root: Path) -> Path | None:
     from .container import compile_database
     return compile_database(root)
+
+
+def free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
 def server_for(path: Path, root: Path, container: Any = None) -> ServerConfig | None:
@@ -141,6 +155,12 @@ def server_for(path: Path, root: Path, container: Any = None) -> ServerConfig | 
         # prefix to match; covering_tests() already falls back to <module> granularity without one.
         return ServerConfig("typescript", "typescript-language-server", ("--stdio",), TYPESCRIPT_EXTENSIONS,
                             "typescript", import_kinds=("import_statement",))
+    if suffix in GDSCRIPT_EXTENSIONS:
+        port = free_port()
+        return ServerConfig("gdscript", "godot", ("--path", str(root), "--headless", "--editor",
+                                                  "--lsp-port", str(port)),
+                            GDSCRIPT_EXTENSIONS, "gdscript", test_function_prefix="test",
+                            transport="tcp", tcp_port=port)
     return None
 
 
@@ -172,8 +192,17 @@ class LspClient:
         self.config = config
         self.root = root.resolve()
         self.timeout = timeout
-        self._proc = subprocess.Popen(config.command, cwd=self.root, stdin=subprocess.PIPE,
-                                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        self._sock: socket.socket | None = None
+        if config.transport == "tcp":
+            self._proc = subprocess.Popen(config.command, cwd=self.root, stdout=subprocess.DEVNULL,
+                                          stderr=subprocess.DEVNULL)
+            sock = self._connect_tcp(config.tcp_port)
+            self._sock = sock
+            self._in = sock.makefile("rb")
+        else:
+            self._proc = subprocess.Popen(config.command, cwd=self.root, stdin=subprocess.PIPE,
+                                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            self._in = self._proc.stdout
         self._next_id = 0
         self._replies: dict[int, dict[str, Any]] = {}
         self._cond = threading.Condition()
@@ -205,19 +234,37 @@ class LspClient:
         try:
             self.request("shutdown", None, timeout=5)
             self.notify("exit", None)
-        except (LspError, BrokenPipeError):
+        except (LspError, OSError):
             pass
+        if self._sock is not None:
+            self._sock.close()
         self._proc.kill()
+
+    def _connect_tcp(self, port: int, timeout: float = 60.0) -> socket.socket:
+        """Godot's own startup (spawning the editor, loading the project) is what this waits out."""
+        deadline = time.monotonic() + timeout
+        last: OSError | None = None
+        while time.monotonic() < deadline:
+            try:
+                return socket.create_connection(("127.0.0.1", port), timeout=5)
+            except OSError as exc:
+                last = exc
+                time.sleep(0.5)
+        raise LspError(f"{self.config.binary}: no LSP server on port {port} after {timeout:.0f}s ({last})")
 
     def _send(self, msg: dict[str, Any]) -> None:
         body = self.config.to_server(json.dumps(msg)).encode()
-        assert self._proc.stdin is not None
+        header = b"Content-Length: %d\r\n\r\n" % len(body) + body
         with self._write_lock:
-            self._proc.stdin.write(b"Content-Length: %d\r\n\r\n" % len(body) + body)
-            self._proc.stdin.flush()
+            if self._sock is not None:
+                self._sock.sendall(header)
+            else:
+                assert self._proc.stdin is not None
+                self._proc.stdin.write(header)
+                self._proc.stdin.flush()
 
     def _read_loop(self) -> None:
-        out = self._proc.stdout
+        out = self._in
         assert out is not None
         while True:
             header = out.readline()
@@ -301,8 +348,15 @@ class LspClient:
             self._flatten(child, path, out, nested or item["kind"] in FUNCTION_KINDS, inner)
 
     def prepare_call_hierarchy(self, path: Path, pos: Position) -> list[dict[str, Any]]:
-        return self.request("textDocument/prepareCallHierarchy", {
-            "textDocument": {"uri": uri_of(path)}, "position": pos.to_lsp()}) or []
+        """Godot has no prepareCallHierarchy at all (issue #46), not just no outgoingCalls."""
+        if "textDocument/prepareCallHierarchy" in self.unsupported:
+            return []
+        try:
+            return self.request("textDocument/prepareCallHierarchy", {
+                "textDocument": {"uri": uri_of(path)}, "position": pos.to_lsp()}) or []
+        except LspUnsupported:
+            self.unsupported.add("textDocument/prepareCallHierarchy")
+            return []
 
     def incoming_calls(self, item: dict[str, Any]) -> list[dict[str, Any]]:
         return self.request("callHierarchy/incomingCalls", {"item": item}) or []
