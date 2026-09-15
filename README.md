@@ -18,6 +18,21 @@ dev image with clangd and gdb layered on top, so nothing has to be installed on 
     npm install -g pyright            # Python projects
     # C++ projects: docker, and a dev image named <repo>:dev, or pass --image
 
+GDScript and TypeScript get the graph and `render` only for now (no `play`, `show` or `keep` yet).
+TypeScript needs `npm install -g typescript-language-server typescript` on top of the above. GDScript
+needs the `godot` binary on PATH (4.x; the LSP is TCP-only, flowdiff spawns and owns the editor process
+itself) and ast-grep's GDScript support, which isn't built in - build it once and register it where
+flowdiff runs from:
+
+    git clone https://github.com/PrestonKnopp/tree-sitter-gdscript
+    cd tree-sitter-gdscript && tree-sitter build -o gdscript.so .
+    # then, in the project flowdiff analyses, an sgconfig.yml next to gdscript.so:
+    #   customLanguages:
+    #     gdscript:
+    #       libraryPath: gdscript.so
+    #       extensions: [gd]
+    #       expandoChar: _
+
 `flowdiff` reads the working tree against HEAD; `flowdiff <ref>` reads HEAD against `<ref>`;
 `flowdiff <A>..<B>` reads B against A, from a worktree checked out under `.flowdiff/head/<project>` —
 `show` and `keep` afterward read whichever tree the last `play` recorded in, no `--repo` needed to

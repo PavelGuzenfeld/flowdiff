@@ -121,8 +121,14 @@ def build_graph(client: LspClient, changed: list[ChangedSymbol], hops: int) -> G
             frontier.append((dst.id, depth + 1))
 
     add_hint_edges(client, g)
-    if "callHierarchy/outgoingCalls" in getattr(client, "unsupported", ()):
-        add_textual_callees(client, g, changed)
+    # Godot never gets past prepareCallHierarchy (issue #46), so outgoingCalls itself never enters
+    # unsupported through the normal path above; check for either method being the one that failed.
+    unsupported = getattr(client, "unsupported", ())
+    if any(m in unsupported for m in ("callHierarchy/outgoingCalls", "textDocument/prepareCallHierarchy")):
+        if client.config.ast_grep_language == "gdscript":
+            add_gdscript_callees(client, g, changed)
+        else:
+            add_textual_callees(client, g, changed)
         g.warnings.append(f"{client.config.binary} has no callHierarchy/outgoingCalls; "
                           "callees come from call expressions in the changed bodies")
     for c in changed:
@@ -172,7 +178,8 @@ def add_hint_edges(client: LspClient, g: Graph) -> None:
                         g.edges.add(Edge(slot_node.id, target.id, "registered"))
 
 
-CALL_KINDS = {"cpp": ("call_expression",), "python": ("call",), "typescript": ("call_expression",)}
+CALL_KINDS = {"cpp": ("call_expression",), "python": ("call",),
+              "typescript": ("call_expression",), "gdscript": ("call",)}
 
 
 def add_textual_callees(client: LspClient, g: Graph, changed: list[ChangedSymbol]) -> None:
@@ -196,6 +203,33 @@ def add_textual_callees(client: LspClient, g: Graph, changed: list[ChangedSymbol
                     dst = g.add(node_of(sym))
                     g.edges.add(Edge(c.symbol.id, dst.id))
                     break
+
+
+def add_gdscript_callees(client: LspClient, g: Graph, changed: list[ChangedSymbol]) -> None:
+    """Godot's LSP has no workspace/symbol either (issue #46), so each call site is resolved directly
+    through definition() instead of searching by name; scans the whole file so ast-grep's match
+    positions stay in the file's own coordinates rather than an extracted body's."""
+    symbols_by_path: dict[Path, list[Symbol]] = {}
+    for c in changed:
+        if c.status == "removed" or not c.symbol.is_function:
+            continue
+        text = c.symbol.path.read_text(encoding="utf-8", errors="replace")
+        client.open(c.symbol.path, text)
+        for match in scan_kinds("gdscript", c.symbol.path.suffix, text, CALL_KINDS["gdscript"]):
+            line, col = match["range"]["start"]["line"], match["range"]["start"]["column"]
+            if not c.symbol.range.overlaps_lines(line, line):
+                continue
+            for loc in client.definition(c.symbol.path, Position(line, col)):
+                if not loc.path.is_relative_to(client.root) or is_test_path(loc.path, client.root):
+                    continue
+                if loc.path not in symbols_by_path:
+                    client.open(loc.path, loc.path.read_text(encoding="utf-8", errors="replace"))
+                    symbols_by_path[loc.path] = client.document_symbols(loc.path)
+                sym = next((s for s in symbols_by_path[loc.path]
+                           if s.is_function and s.selection.start.line == loc.range.start.line), None)
+                if sym:
+                    dst = g.add(node_of(sym))
+                    g.edges.add(Edge(c.symbol.id, dst.id))
 
 
 def run_ast_grep(rule: Path, root: Path) -> list[dict[str, Any]]:

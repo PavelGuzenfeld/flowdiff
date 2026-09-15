@@ -1,7 +1,10 @@
 import dataclasses
+import inspect
 import json
 import os
+import socket
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -72,6 +75,21 @@ def test_outgoing_calls_unsupported_by_the_server_is_an_empty_list_asked_once(tm
         before = c._next_id
         assert c.outgoing_calls(items[0]) == [] and c._next_id == before
         assert c.incoming_calls(items[0])
+    finally:
+        c.close()
+
+
+def test_prepare_call_hierarchy_unsupported_is_an_empty_list_asked_once(tmp_path: Path, monkeypatch):
+    """Godot has no prepareCallHierarchy at all (issue #46) - build_graph must not crash on this."""
+    monkeypatch.setenv("FAKE_NO_PREPARE", "1")
+    c = LspClient(fake_config(), tmp_path, timeout=5)
+    try:
+        path = tmp_path / "m.py"
+        c.open(path, "")
+        assert c.prepare_call_hierarchy(path, Position(1, 8)) == []
+        assert c.unsupported == {"textDocument/prepareCallHierarchy"}
+        before = c._next_id
+        assert c.prepare_call_hierarchy(path, Position(1, 8)) == [] and c._next_id == before
     finally:
         c.close()
 
@@ -356,6 +374,10 @@ def test_server_for_by_extension(tmp_path: Path, monkeypatch):
     ts = lsp.server_for(Path("x.ts"), tmp_path)
     assert ts and ts.command == ["typescript-language-server", "--stdio"]
     assert lsp.server_for(Path("x.tsx"), tmp_path) is not None
+    gd = lsp.server_for(Path("x.gd"), tmp_path)
+    assert gd and gd.binary == "godot" and gd.transport == "tcp" and gd.tcp_port > 0
+    assert gd.command[:5] == ["godot", "--path", str(tmp_path), "--headless", "--editor"]
+    assert gd.command[-2:] == ["--lsp-port", str(gd.tcp_port)]
     assert lsp.server_for(Path("x.rs"), tmp_path) is None
 
 
@@ -419,3 +441,84 @@ def test_slice_at_the_last_line_of_the_text():
     text = "abc\ndef\n"
     assert Range(Position(1, 0), Position(1, 3)).slice(text) == "def"
     assert Range(Position(2, 0), Position(2, 3)).slice(text) == ""
+
+
+def test_free_port_returns_a_distinct_bindable_port_each_time():
+    a, b = lsp.free_port(), lsp.free_port()
+    assert a != b
+    for port in (a, b):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", port))
+
+
+def _respond_to_one_initialize(port: int) -> None:
+    """Answers exactly one request over a raw socket, the same framing the real client speaks."""
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", port))
+    server.listen(1)
+    conn, _ = server.accept()
+    buf = b""
+    while b"\r\n\r\n" not in buf:
+        buf += conn.recv(65536)
+    header, rest = buf.split(b"\r\n\r\n", 1)
+    length = int([line for line in header.split(b"\r\n") if line.lower().startswith(b"content-length")][0].split(b":")[1])
+    while len(rest) < length:
+        rest += conn.recv(65536)
+    request = json.loads(rest[:length])
+    body = json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": {"capabilities": {}}}).encode()
+    conn.sendall(b"Content-Length: %d\r\n\r\n" % len(body) + body)
+    conn.close()
+    server.close()
+
+
+def test_tcp_transport_round_trips_the_initialize_handshake(tmp_path: Path):
+    """Godot's LSP has no stdio mode (issue #46): frames go over a socket instead."""
+    port = lsp.free_port()
+    threading.Thread(target=_respond_to_one_initialize, args=(port,), daemon=True).start()
+    config = ServerConfig("gdscript", sys.executable, ("-c", "import time; time.sleep(30)"),
+                          frozenset({".gd"}), "gdscript", transport="tcp", tcp_port=port)
+    client = LspClient(config, tmp_path, timeout=5)
+    try:
+        assert client._sock is not None
+    finally:
+        client._proc.kill()
+
+
+def test_tcp_transport_gives_up_after_its_timeout_when_nothing_listens():
+    config = ServerConfig("gdscript", sys.executable, ("-c", "import time; time.sleep(30)"),
+                          frozenset({".gd"}), "gdscript", transport="tcp", tcp_port=lsp.free_port())
+    client = LspClient.__new__(LspClient)
+    client.config = config
+    with pytest.raises(LspError, match="no LSP server on port"):
+        client._connect_tcp(config.tcp_port, timeout=0.3)
+
+
+def test_connect_tcp_default_timeout_is_sixty_seconds():
+    default = inspect.signature(LspClient._connect_tcp).parameters["timeout"].default
+    assert default == 60.0
+
+
+def test_server_config_defaults_to_stdio_and_no_tcp_port():
+    cfg = ServerConfig("x", "clangd", (), frozenset(), "x")
+    assert cfg.transport == "stdio" and cfg.tcp_port == 0
+
+
+def test_connect_tcp_retries_every_half_second_with_a_five_second_attempt_timeout_until_the_deadline(monkeypatch):
+    """Pins the retry cadence with a deterministic fake clock, no real waiting: two attempts inside a
+    1s deadline (t=0.0, t=0.5), each a 5s per-attempt socket timeout, none at or after the deadline."""
+    clock = {"t": 0.0}
+    monkeypatch.setattr(lsp.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(lsp.time, "sleep", lambda s: clock.__setitem__("t", clock["t"] + s))
+    attempts = []
+
+    def fake_connect(_addr, timeout):
+        attempts.append((clock["t"], timeout))
+        raise OSError("refused")
+
+    monkeypatch.setattr(lsp.socket, "create_connection", fake_connect)
+    client = LspClient.__new__(LspClient)
+    client.config = ServerConfig("gdscript", "godot", (), frozenset({".gd"}), "gdscript")
+    with pytest.raises(LspError):
+        client._connect_tcp(1234, timeout=1.0)
+    assert attempts == [(0.0, 5), (0.5, 5)]

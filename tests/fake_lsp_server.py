@@ -75,8 +75,11 @@ def handle(msg):
                      "children": [{"name": "m", "kind": 6, "detail": "(self) -> int",
                                    "range": rng(1, 4, 4, 0), "selectionRange": rng(1, 8, 1, 9)}]}])
     elif method == "textDocument/prepareCallHierarchy":
-        reply(rid, [{"name": "m", "kind": 6, "uri": FILE_URI, "range": rng(1, 4, 4, 0),
-                     "selectionRange": rng(1, 8, 1, 9)}])
+        if os.environ.get("FAKE_NO_PREPARE"):
+            send({"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": "method not found"}})
+        else:
+            reply(rid, [{"name": "m", "kind": 6, "uri": FILE_URI, "range": rng(1, 4, 4, 0),
+                        "selectionRange": rng(1, 8, 1, 9)}])
     elif method == "callHierarchy/incomingCalls":
         reply(rid, [{"from": {"name": "caller", "kind": 12, "uri": FILE_URI, "range": rng(7, 0, 9, 0),
                               "selectionRange": rng(7, 4, 7, 10)}, "fromRanges": []}])

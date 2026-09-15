@@ -147,6 +147,121 @@ def test_textual_callees_fill_in_for_typescript_too(tmp_path: Path):
     assert {g.nodes[e.dst].name for e in g.edges if e.src == run.id} == {"helper"}
 
 
+@pytest.mark.skipif(shutil.which("ast-grep") is None, reason="ast-grep not installed")
+def test_the_fallback_also_fires_when_only_prepare_call_hierarchy_is_unsupported(tmp_path: Path):
+    """Godot never gets past prepareCallHierarchy, so outgoingCalls itself never enters unsupported
+    through the normal path - the trigger must check for either method (issue #46)."""
+    source = tmp_path / "gst" / "t.cpp"
+    source.parent.mkdir()
+    source.write_text("int helper(int x) { return x; }\nint crop(int v) { return helper(v); }\n\n")
+    crop = symbol("crop", source, 1, last=2, kind=12)
+    helper = symbol("helper", source, 0, last=0)
+    syms = {"crop": crop, "helper": helper}
+    client = FakeClient(tmp_path, syms, {}, language="cpp")
+    client.unsupported.add("textDocument/prepareCallHierarchy")
+    g = graph.build_graph(client, changed(syms, ("crop", "body")), hops=3)
+    assert graph.Edge(crop.id, helper.id) in g.edges
+
+
+def test_gdscript_callees_are_resolved_through_definition_not_workspace_symbol(tmp_path: Path, monkeypatch):
+    """Godot's LSP has no workspace/symbol either (issue #46); the call site's own position, not a
+    name search, is what resolves the callee. ast-grep's own GDScript parsing (a custom grammar the
+    user builds and registers, not bundled here) is stubbed so this runs without that setup."""
+    source = tmp_path / "player.gd"
+    source.write_text("func take_damage(amount):\n\thealth -= amount\n\tdie()\n\n"
+                      "func die():\n\tqueue_free()\n")
+    take_damage = symbol("take_damage", source, 0, last=3, kind=6)
+    die = symbol("die", source, 4, last=5, kind=6)
+    syms = {"take_damage": take_damage, "die": die}
+    client = FakeClient(tmp_path, syms, {}, language="gdscript")
+    client.unsupported.add("textDocument/prepareCallHierarchy")
+    monkeypatch.setattr(graph, "scan_kinds",
+                        lambda *a, **kw: [{"range": {"start": {"line": 2, "column": 1}}}])
+    g = graph.build_graph(client, changed(syms, ("take_damage", "body")), hops=3)
+    assert graph.Edge(take_damage.id, die.id) in g.edges
+
+
+def test_gdscript_callees_skip_a_removed_or_non_function_symbol_but_keep_going(tmp_path: Path, monkeypatch):
+    """A removed symbol or a non-function one (e.g. a changed constant) must not be scanned for calls,
+    and skipping one must not stop the ones after it (issue #46)."""
+    source = tmp_path / "player.gd"
+    source.write_text("x")
+    gone = symbol("gone", source, 0, last=1, kind=6)
+    const = symbol("HEALTH_MAX", source, 2, last=3, kind=13)
+    take_damage = symbol("take_damage", source, 4, last=5, kind=6)
+    die = symbol("die", source, 10, last=11, kind=6)
+    client = FakeClient(tmp_path, {"take_damage": take_damage, "die": die}, {}, language="gdscript")
+    monkeypatch.setattr(graph, "scan_kinds", lambda *a, **kw: [
+        {"range": {"start": {"line": 0, "column": 0}}},   # inside gone's range - must never be scanned
+        {"range": {"start": {"line": 2, "column": 0}}},   # inside const's range - must never be scanned
+        {"range": {"start": {"line": 4, "column": 0}}}])  # take_damage's real call
+    monkeypatch.setattr(client, "definition", lambda path, pos: [Location(source, die.selection)])
+    changed_syms = [ChangedSymbol(gone, "removed"), ChangedSymbol(const, "body"),
+                    ChangedSymbol(take_damage, "body")]
+    g = graph.Graph()
+    graph.add_gdscript_callees(client, g, changed_syms)
+    assert g.edges == {graph.Edge(take_damage.id, die.id)}
+
+
+def test_gdscript_callees_skip_one_out_of_range_match_but_still_resolve_the_next(tmp_path: Path, monkeypatch):
+    """One call outside the changed function's own range must not stop the scan of the calls after it."""
+    source = tmp_path / "player.gd"
+    source.write_text("x")
+    take_damage = symbol("take_damage", source, 0, last=1, kind=6)
+    die = symbol("die", source, 10, last=11, kind=6)
+    client = FakeClient(tmp_path, {"take_damage": take_damage, "die": die}, {}, language="gdscript")
+    monkeypatch.setattr(graph, "scan_kinds", lambda *a, **kw: [
+        {"range": {"start": {"line": 9, "column": 0}}},   # outside take_damage's range - must be skipped
+        {"range": {"start": {"line": 0, "column": 0}}}])  # inside it - must still resolve
+    monkeypatch.setattr(client, "definition", lambda path, pos: [Location(source, die.selection)])
+    g = graph.Graph()
+    graph.add_gdscript_callees(client, g, [ChangedSymbol(take_damage, "body")])
+    assert g.edges == {graph.Edge(take_damage.id, die.id)}
+
+
+def test_gdscript_callees_skip_one_bad_definition_result_but_still_resolve_the_next(tmp_path: Path, monkeypatch):
+    """A definition() result outside the repo, or under a test path, must not stop the scan of the
+    results after it - and either filter alone must drop its own result, never both required at once.
+    Each bad result resolves to a real decoy symbol, so an unfiltered one would add its own wrong edge."""
+    source = tmp_path / "player.gd"
+    source.write_text("x")
+    take_damage = symbol("take_damage", source, 0, last=1, kind=6)
+    die = symbol("die", source, 10, last=11, kind=6)
+    outside = Path("/outside/repo.gd")
+    outside_decoy = symbol("outside_decoy", outside, 0, last=1, kind=6)
+    test_file = tmp_path / "tests" / "test_x.gd"
+    test_decoy = symbol("test_decoy", test_file, 0, last=1, kind=6)
+    client = FakeClient(tmp_path, {"take_damage": take_damage, "die": die,
+                                  "outside_decoy": outside_decoy, "test_decoy": test_decoy}, {},
+                        language="gdscript")
+    monkeypatch.setattr(graph, "scan_kinds", lambda *a, **kw: [{"range": {"start": {"line": 0, "column": 0}}}])
+    monkeypatch.setattr(client, "definition", lambda path, pos: [
+        Location(outside, outside_decoy.selection),
+        Location(test_file, test_decoy.selection),
+        Location(source, die.selection)])
+    g = graph.Graph()
+    graph.add_gdscript_callees(client, g, [ChangedSymbol(take_damage, "body")])
+    assert g.edges == {graph.Edge(take_damage.id, die.id)}
+
+
+def test_gdscript_callees_pick_the_symbol_whose_own_line_matches_not_the_first_other_one(tmp_path: Path,
+                                                                                          monkeypatch):
+    """Three candidates at three different lines: the one actually at the definition's line must win,
+    not merely "some other function" (issue #46)."""
+    source = tmp_path / "player.gd"
+    source.write_text("x")
+    take_damage = symbol("take_damage", source, 0, last=1, kind=6)
+    decoy = symbol("decoy", source, 5, last=6, kind=6)
+    die = symbol("die", source, 10, last=11, kind=6)
+    client = FakeClient(tmp_path, {"take_damage": take_damage, "decoy": decoy, "die": die}, {},
+                        language="gdscript")
+    monkeypatch.setattr(graph, "scan_kinds", lambda *a, **kw: [{"range": {"start": {"line": 0, "column": 0}}}])
+    monkeypatch.setattr(client, "definition", lambda path, pos: [Location(source, die.selection)])
+    g = graph.Graph()
+    graph.add_gdscript_callees(client, g, [ChangedSymbol(take_damage, "body")])
+    assert g.edges == {graph.Edge(take_damage.id, die.id)}
+
+
 def test_build_graph_tolerates_a_symbol_with_no_hierarchy(tmp_path: Path):
     syms = {"ghost": symbol("ghost", tmp_path / "other.py", 99)}
     client = FakeClient(tmp_path, {}, {})
