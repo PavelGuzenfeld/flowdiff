@@ -137,13 +137,12 @@ class Plan:
 
 
 def python_plan(client: lsp.LspClient, g: graph.Graph, flow: graph.Flow, root: Path, base: Path, out_dir: Path,
-                index: int, timeout: float, freeze: bool = False) -> Plan:
+                index: int, timeout: float, interpreter: Path, freeze: bool = False) -> Plan:
     harness = harness_py.build(client, root, base, flow, g)
     harness_path = out_dir / f"flow{index}.py"
     harness_path.write_text(harness.source)
     frames = [harness_py.frame_id(root, f) for f in flow.frames if f.status != "slot"]
     traces = {side: out_dir / f"flow{index}.{side}.jsonl" for side in ("base", "head")}
-    interpreter = env.python_interpreter(root)
     plan = Plan(frames, warnings=list(harness.warnings), driver=harness.driver)
     shared, changed_tests = shared_tests(base, root, flow.tests) if flow.tests else ([], [])
     if harness.complete:
@@ -290,6 +289,7 @@ def cpp_plan(ctr: container.Container, client: lsp.LspClient, flow: graph.Flow, 
 def run(args: argparse.Namespace) -> int:
     plans: dict[int, Plan] = {}
     base_holder: list[Path] = []
+    interpreter_holder: list[Path] = []
 
     def visit(client: lsp.LspClient, g: graph.Graph, flows: list[graph.Flow], analysis: cli.Analysis) -> None:
         root = client.root
@@ -298,13 +298,17 @@ def run(args: argparse.Namespace) -> int:
         out_dir = run_dir(root)
         if client.config.language_id == "python":
             graph.open_test_files(client, g)
+            if not interpreter_holder:
+                chosen, convention = env.python_interpreter(root)
+                interpreter_holder.append(chosen)
+                print(f"python: {chosen} ({convention})", file=sys.stderr)
         for flow in flows:
             if flow.removed_only:
                 continue
             index = len(plans) + 1
             if client.config.language_id == "python":
                 plans[id(flow)] = python_plan(client, g, flow, root, base_holder[0], out_dir, index,
-                                              args.run_timeout, args.freeze)
+                                              args.run_timeout, interpreter_holder[0], args.freeze)
             elif analysis.container is not None:
                 plans[id(flow)] = cpp_plan(analysis.container, client, flow, root, base_holder[0], out_dir, index,
                                            args.run_timeout, args.build_timeout, args.no_build, args.dry_run)

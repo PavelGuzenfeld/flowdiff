@@ -8,19 +8,33 @@ import sys
 from pathlib import Path
 
 TOOL_ROOT = Path(__file__).resolve().parent.parent
+UV_QUERY = ["uv", "run", "python", "-c", "import sys; print(sys.executable)"]
+POETRY_QUERY = ["poetry", "env", "info", "--path"]
 
 
-def python_interpreter(root: Path) -> Path:
+def reported_path(cmd: list[str], root: Path) -> str:
+    """Where a package manager says its environment is; empty when it fails or is not installed."""
+    try:
+        out = subprocess.run(cmd, cwd=root, capture_output=True, text=True)
+    except OSError:
+        return ""
+    return out.stdout.strip() if out.returncode == 0 else ""
+
+
+def python_interpreter(root: Path) -> tuple[Path, str]:
+    """The project's interpreter and the convention that named it (decision 46)."""
     active = os.environ.get("VIRTUAL_ENV")
     if active and (Path(active) / "bin" / "python").exists():
-        return Path(active) / "bin" / "python"
+        return Path(active) / "bin" / "python", "$VIRTUAL_ENV"
     if (root / ".venv" / "bin" / "python").exists():
-        return root / ".venv" / "bin" / "python"
-    if (root / "poetry.lock").exists():
-        out = subprocess.run(["poetry", "env", "info", "--path"], cwd=root, capture_output=True, text=True)
-        if out.returncode == 0 and out.stdout.strip():
-            return Path(out.stdout.strip()) / "bin" / "python"
-    return Path(sys.executable)
+        return root / ".venv" / "bin" / "python", ".venv/"
+    # uv answers no report-only query: `uv python find` names the system interpreter and
+    # `uv run --no-sync` leaves an unsynced .venv, so asking it syncs the project (issue #74).
+    if (root / "uv.lock").exists() and (found := reported_path(UV_QUERY, root)):
+        return Path(found), "uv.lock"
+    if (root / "poetry.lock").exists() and (found := reported_path(POETRY_QUERY, root)):
+        return Path(found) / "bin" / "python", "poetry.lock"
+    return Path(sys.executable), "no project environment; flowdiff's own interpreter"
 
 
 def harness_env(tree: Path, side: str = "", trace_out: Path | None = None, frames: list[str] | None = None,
