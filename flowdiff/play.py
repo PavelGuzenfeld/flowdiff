@@ -288,8 +288,6 @@ def cpp_plan(ctr: container.Container, client: lsp.LspClient, flow: graph.Flow, 
 
 
 def run(args: argparse.Namespace) -> int:
-    if args.dry_run:
-        args.no_build = True
     plans: dict[int, Plan] = {}
     base_holder: list[Path] = []
 
