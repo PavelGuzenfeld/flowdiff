@@ -22,17 +22,23 @@ def args_for(root: Path, *extra: str):
     return cli.build_play_parser().parse_args(["--repo", str(root), *extra])
 
 
+def without_the_interpreter_line(err: str) -> str:
+    """Drops the one `python: <path> (<convention>)` line a run prints, so the rest can be asserted whole."""
+    named, _, rest = err.partition("\n")
+    assert named.startswith("python: ") and named.endswith(")")
+    return rest
+
+
 def test_python_plan_uses_the_harness_when_it_is_complete(tmp_path: Path, monkeypatch):
     flow, nodes = flow_of(tmp_path)
     (tmp_path / "lib.py").write_text("")
     monkeypatch.setattr(harness_py, "build", lambda *a: harness_py.Harness("SRC", True, ("w1",), "lib.py:scale"))
-    monkeypatch.setattr(play.env, "python_interpreter", lambda root: Path("/py"))
     seen = {}
     monkeypatch.setattr(play, "run_harness", lambda *a: seen.setdefault("harness", a) and None)
     monkeypatch.setattr(play, "test_delta", lambda *a: ["  d"])
     out = tmp_path / "run"
     out.mkdir()
-    plan = play.python_plan(FakeClient(tmp_path, {}, {}), graph.Graph(), flow, tmp_path, tmp_path / "base", out, 1, 9.0)
+    plan = play.python_plan(FakeClient(tmp_path, {}, {}), graph.Graph(), flow, tmp_path, tmp_path / "base", out, 1, 9.0, Path("/py"))
     assert (out / "flow1.py").read_text() == "SRC"
     assert plan.frames == ["lib.py:scale", "lib.py:clamp"] and plan.driver == "lib.py:scale" and plan.warnings == ["w1"]
     assert plan.note is None and plan.stop is None
@@ -46,7 +52,6 @@ def test_python_plan_threads_freeze_into_run_harness_and_run_traced_tests(tmp_pa
     flow, nodes = flow_of(tmp_path)
     (tmp_path / "lib.py").write_text("")
     monkeypatch.setattr(harness_py, "build", lambda *a: harness_py.Harness("SRC", True, (), "lib.py:scale"))
-    monkeypatch.setattr(play.env, "python_interpreter", lambda root: Path("/py"))
     seen = {}
 
     def spy_harness(*a):
@@ -55,7 +60,7 @@ def test_python_plan_threads_freeze_into_run_harness_and_run_traced_tests(tmp_pa
     out = tmp_path / "run"
     out.mkdir()
     complete = play.python_plan(FakeClient(tmp_path, {}, {}), graph.Graph(), flow, tmp_path, tmp_path / "base",
-                                out, 1, 9.0, True)
+                                out, 1, 9.0, Path("/py"), True)
     complete.drive("base", tmp_path / "base")
     assert seen["harness"][-1] is True
 
@@ -65,12 +70,12 @@ def test_python_plan_threads_freeze_into_run_harness_and_run_traced_tests(tmp_pa
     monkeypatch.setattr(play, "shared_tests", lambda base, root, tests: (["tests/test_lib.py::test_scale"], []))
     monkeypatch.setattr(play, "run_traced_tests", spy_traced)
     shared = play.python_plan(FakeClient(tmp_path, {}, {}), graph.Graph(), flow, tmp_path, tmp_path / "base",
-                              out, 2, 9.0, True)
+                              out, 2, 9.0, Path("/py"), True)
     shared.drive("head", tmp_path)
     assert seen["traced"][-1] is True
 
     default = play.python_plan(FakeClient(tmp_path, {}, {}), graph.Graph(), flow, tmp_path, tmp_path / "base",
-                               out, 3, 9.0)
+                               out, 3, 9.0, Path("/py"))
     default.drive("head", tmp_path)
     assert seen["traced"][-1] is False
 
@@ -78,7 +83,6 @@ def test_python_plan_threads_freeze_into_run_harness_and_run_traced_tests(tmp_pa
 def test_python_plan_dry_run_names_the_harness_command_without_running_it(tmp_path: Path, monkeypatch):
     flow, nodes = flow_of(tmp_path)
     monkeypatch.setattr(harness_py, "build", lambda *a: harness_py.Harness("SRC", True))
-    monkeypatch.setattr(play.env, "python_interpreter", lambda root: Path("/py"))
 
     def must_not_run(*a):
         raise AssertionError("dry-run must not invoke run_harness")
@@ -86,7 +90,7 @@ def test_python_plan_dry_run_names_the_harness_command_without_running_it(tmp_pa
     out = tmp_path / "run"
     out.mkdir()
     base = tmp_path / "base"
-    plan = play.python_plan(FakeClient(tmp_path, {}, {}), graph.Graph(), flow, tmp_path, base, out, 1, 9.0)
+    plan = play.python_plan(FakeClient(tmp_path, {}, {}), graph.Graph(), flow, tmp_path, base, out, 1, 9.0, Path("/py"))
     assert plan.plan_lines() == [f"base: cwd={base}  /py {out / 'flow1.py'}",
                                  f"head: cwd={tmp_path}  /py {out / 'flow1.py'}"]
 
@@ -94,29 +98,27 @@ def test_python_plan_dry_run_names_the_harness_command_without_running_it(tmp_pa
 def test_python_plan_falls_back_to_shared_tests_then_stops(tmp_path: Path, monkeypatch):
     flow, nodes = flow_of(tmp_path)
     monkeypatch.setattr(harness_py, "build", lambda *a: harness_py.Harness("SRC", False))
-    monkeypatch.setattr(play.env, "python_interpreter", lambda root: Path("/py"))
     monkeypatch.setattr(play, "shared_tests", lambda base, root, tests: (["tests/test_lib.py::test_scale"], ["tests/test_lib.py"]))
     seen = {}
     monkeypatch.setattr(play, "run_traced_tests", lambda *a: seen.setdefault("traced", a) and None)
     out = tmp_path / "run"
     out.mkdir()
-    plan = play.python_plan(FakeClient(tmp_path, {}, {}), graph.Graph(), flow, tmp_path, tmp_path / "base", out, 2, 9.0)
+    plan = play.python_plan(FakeClient(tmp_path, {}, {}), graph.Graph(), flow, tmp_path, tmp_path / "base", out, 2, 9.0, Path("/py"))
     assert plan.note == "driven by 1 covering test(s) present on both sides" and plan.driver is None
     assert plan.warnings == ["the driving tests changed in this diff (tests/test_lib.py); a divergence may reflect the inputs rather than the code"]
     assert plan.drive("head", tmp_path) is None
     assert seen["traced"][:4] == (Path("/py"), tmp_path, ["tests/test_lib.py::test_scale"], plan.frames)
     monkeypatch.setattr(play, "shared_tests", lambda base, root, tests: ([], []))
-    stopped = play.python_plan(FakeClient(tmp_path, {}, {}), graph.Graph(), flow, tmp_path, tmp_path / "base", out, 3, 9.0)
+    stopped = play.python_plan(FakeClient(tmp_path, {}, {}), graph.Graph(), flow, tmp_path, tmp_path / "base", out, 3, 9.0, Path("/py"))
     assert stopped.drive is None and stopped.stop.startswith("no call site with literal arguments and no covering test")
     assert f"fill the slots in {out / 'flow3.py'}" in stopped.stop
     flow.tests.clear()
-    assert play.python_plan(FakeClient(tmp_path, {}, {}), graph.Graph(), flow, tmp_path, tmp_path / "base", out, 4, 9.0).delta is None
+    assert play.python_plan(FakeClient(tmp_path, {}, {}), graph.Graph(), flow, tmp_path, tmp_path / "base", out, 4, 9.0, Path("/py")).delta is None
 
 
 def test_python_plan_dry_run_names_the_pytest_command_for_shared_tests(tmp_path: Path, monkeypatch):
     flow, nodes = flow_of(tmp_path)
     monkeypatch.setattr(harness_py, "build", lambda *a: harness_py.Harness("SRC", False))
-    monkeypatch.setattr(play.env, "python_interpreter", lambda root: Path("/py"))
     monkeypatch.setattr(play, "shared_tests", lambda base, root, tests: (["tests/test_lib.py::test_scale"], []))
     monkeypatch.setattr(play, "present", lambda tree, test: True)
 
@@ -126,7 +128,7 @@ def test_python_plan_dry_run_names_the_pytest_command_for_shared_tests(tmp_path:
     out = tmp_path / "run"
     out.mkdir()
     base = tmp_path / "base"
-    plan = play.python_plan(FakeClient(tmp_path, {}, {}), graph.Graph(), flow, tmp_path, base, out, 5, 9.0)
+    plan = play.python_plan(FakeClient(tmp_path, {}, {}), graph.Graph(), flow, tmp_path, base, out, 5, 9.0, Path("/py"))
     lines = plan.plan_lines()
     pytest_cmd = (f"-m pytest -q -p no:cacheprovider -p flowdiff.pytest_tracer --basetemp={out / 'basetemp'} "
                  "tests/test_lib.py::test_scale")
@@ -136,7 +138,6 @@ def test_python_plan_dry_run_names_the_pytest_command_for_shared_tests(tmp_path:
 def test_python_plan_dry_run_reports_a_side_missing_the_covering_test(tmp_path: Path, monkeypatch):
     flow, nodes = flow_of(tmp_path)
     monkeypatch.setattr(harness_py, "build", lambda *a: harness_py.Harness("SRC", False))
-    monkeypatch.setattr(play.env, "python_interpreter", lambda root: Path("/py"))
     monkeypatch.setattr(play, "shared_tests", lambda base, root, tests: (["tests/test_lib.py::test_scale"], []))
     out = tmp_path / "run"
     out.mkdir()
@@ -146,7 +147,7 @@ def test_python_plan_dry_run_reports_a_side_missing_the_covering_test(tmp_path: 
     def must_not_run(*a):
         raise AssertionError("dry-run must not invoke run_traced_tests")
     monkeypatch.setattr(play, "run_traced_tests", must_not_run)
-    plan = play.python_plan(FakeClient(tmp_path, {}, {}), graph.Graph(), flow, tmp_path, base, out, 6, 9.0)
+    plan = play.python_plan(FakeClient(tmp_path, {}, {}), graph.Graph(), flow, tmp_path, base, out, 6, 9.0, Path("/py"))
     lines = plan.plan_lines()
     pytest_cmd = (f"-m pytest -q -p no:cacheprovider -p flowdiff.pytest_tracer --basetemp={out / 'basetemp'} "
                  "tests/test_lib.py::test_scale")
@@ -398,6 +399,17 @@ def written_plan(root: Path, frames, base_ret, head_ret, **kw):
     return play.Plan(frames, drive=drive, **kw)
 
 
+def test_run_names_the_chosen_interpreter_and_its_convention_once_for_every_flow(repo: Path, monkeypatch, capsys):
+    """The wrong interpreter fails as a ModuleNotFoundError in the target project, so which one was
+    picked and why has to be on stderr before anything runs (issue #74)."""
+    flows = [flow_of(repo)[0], flow_of(repo)[0]]
+    fake_analyse(monkeypatch, repo, flows)
+    monkeypatch.setattr(play.env, "python_interpreter", lambda root: (Path("/envs/proj/bin/python"), "uv.lock"))
+    monkeypatch.setattr(play, "python_plan", lambda *a: play.Plan(["lib.py:scale"], stop="stopped"))
+    play.run(args_for(repo))
+    assert capsys.readouterr().err.splitlines() == ["python: /envs/proj/bin/python (uv.lock)", "warning: w0"]
+
+
 def test_run_drives_both_sides_prints_the_verdict_and_writes_the_index(repo: Path, monkeypatch, capsys):
     flow, nodes = flow_of(repo)
     fake_analyse(monkeypatch, repo, [flow])
@@ -409,7 +421,7 @@ def test_run_drives_both_sides_prints_the_verdict_and_writes_the_index(repo: Pat
     assert "flow 1/1\nGRAPH\n" in captured.out and "1 of 1 frames differ: scale (return); origin scale\nlinked: host\n" in captured.out
     assert "lib.py:scale  base 1 call(s), head 1 call(s)\n  calls #1\n    return  8  →  12\n" in captured.out
     assert captured.out.rstrip().endswith("  t  PASS→FAIL")
-    assert captured.err == "warning: w0\nwarning: w1\n"
+    assert without_the_interpreter_line(captured.err) == "warning: w0\nwarning: w1\n"
     index = json.loads((repo / ".flowdiff" / "run" / "index.json").read_text())
     assert index[0]["driver"] == "lib.py:scale" and index[0]["names"] == {"lib.py:scale": "scale", "lib.py:clamp": "clamp"}
     assert (index[0]["mock"], index[0]["device_libraries"], index[0]["image"]) == (False, [], None)
@@ -442,7 +454,7 @@ def test_run_wires_a_thread_warning_from_the_report_into_the_printed_warnings(re
     plan = play.Plan(frames, drive=drive, driver="lib.py:scale")
     monkeypatch.setattr(play, "python_plan", lambda *a: plan)
     assert play.run(args_for(repo)) == 0
-    assert capsys.readouterr().err == "warning: w0\nwarning: scale: entered from more than one thread; call order is not stable\n"
+    assert without_the_interpreter_line(capsys.readouterr().err) == "warning: w0\nwarning: scale: entered from more than one thread; call order is not stable\n"
 
 
 def test_run_fail_on_mock_exits_nothing_and_records_the_variant_in_the_index(repo: Path, monkeypatch, capsys):
@@ -665,7 +677,7 @@ def test_run_stops_on_a_plan_that_cannot_drive_and_fails_on_a_drive_failure(repo
     assert "fill the slots in x\n" in capsys.readouterr().out
     monkeypatch.setattr(play, "python_plan", lambda *a: play.Plan(["lib.py:scale"], drive=lambda side, tree: f"{side}: boom"))
     assert play.run(args_for(repo)) == 1
-    assert capsys.readouterr().err.startswith("base: boom")
+    assert without_the_interpreter_line(capsys.readouterr().err).startswith("base: boom")
     monkeypatch.setattr(play, "python_plan", lambda *a: play.Plan(["lib.py:scale"]))
     assert play.run(args_for(repo)) == 2
     assert "nothing can drive this flow" in capsys.readouterr().out
