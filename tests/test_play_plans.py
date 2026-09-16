@@ -601,7 +601,9 @@ def test_run_dry_run_visits_every_flow_with_one_blank_line_between(repo: Path, m
     assert out.endswith("PLAN-B\n")
 
 
-def test_run_dry_run_forces_no_build_before_analysing(repo: Path, monkeypatch):
+def test_run_dry_run_leaves_the_build_to_analyse(repo: Path, monkeypatch):
+    """no_build is read inside analyse, so forcing it for --dry-run degraded the graph itself: a symbol
+    behind a build-flag define never reached changed_symbols and its flow vanished (issue #76)."""
     seen = {}
 
     def analyse(args, visit=None):
@@ -609,12 +611,14 @@ def test_run_dry_run_forces_no_build_before_analysing(repo: Path, monkeypatch):
         return cli.Analysis(repo, changes.Revisions(repo, "HEAD", None), [], [])
     monkeypatch.setattr(cli, "analyse", analyse)
     assert play.run(args_for(repo, "--dry-run")) == cli.EXIT_NOTHING
+    assert seen["no_build"] is False
+    assert play.run(args_for(repo, "--dry-run", "--no-build")) == cli.EXIT_NOTHING
     assert seen["no_build"] is True
     assert play.run(args_for(repo)) == cli.EXIT_NOTHING
     assert seen["no_build"] is False
 
 
-def test_run_dry_run_routes_cpp_flows_to_cpp_plan_with_no_build_forced(repo: Path, monkeypatch, capsys):
+def test_run_dry_run_routes_cpp_flows_to_cpp_plan_without_forcing_no_build(repo: Path, monkeypatch, capsys):
     flow, nodes = flow_of(repo, tests=("tests/test_lib.cpp::t",), language="cpp")
     ctr = container.Container("img", "/src")
     fake_analyse(monkeypatch, repo, [flow], language="cpp", ctr=ctr)
@@ -629,8 +633,10 @@ def test_run_dry_run_routes_cpp_flows_to_cpp_plan_with_no_build_forced(repo: Pat
         return play.Plan(["lib.cpp:scale"], drive=must_not_drive, plan_lines=lambda: ["head: cc"])
     monkeypatch.setattr(play, "cpp_plan", cpp_plan)
     assert play.run(args_for(repo, "--dry-run")) == 0
-    assert seen["no_build"] is True and seen["dry_run"] is True
+    assert seen["no_build"] is False and seen["dry_run"] is True
     assert "head: cc" in capsys.readouterr().out
+    assert play.run(args_for(repo, "--dry-run", "--no-build")) == 0
+    assert seen["no_build"] is True and seen["dry_run"] is True
 
 
 def test_run_dry_run_on_a_stopped_flow_still_prints_why_it_stopped(repo: Path, monkeypatch, capsys):
