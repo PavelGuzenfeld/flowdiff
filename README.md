@@ -8,17 +8,22 @@ you which frame first produced a different value. `git diff` answers "what did I
 
 Python and C++. Python runs natively in the project's own interpreter. C++ runs inside the project's
 dev image with clangd and gdb layered on top, so nothing has to be installed on the host beyond docker.
+That is the path taken whenever the compile database is missing or names a directory the host does not
+have — which is the usual case for a containerised build. A C++ project whose compile database *is*
+usable on the host is read by a host clangd instead, and there `play` only analyses: the graph is
+drawn, nothing is run.
 
 ## Install
 
     git clone https://github.com/PavelGuzenfeld/flowdiff
     cd flowdiff && python3 -m venv .venv && .venv/bin/pip install -e .[dev]
-    sudo apt install git libgraph-easy-perl clangd
+    sudo apt install git libgraph-easy-perl
+    sudo apt install clangd            # only for C++ read on the host; the dev image carries its own
     cargo install ast-grep            # or a release binary on PATH
     npm install -g pyright            # Python projects
     # C++ projects: docker, and a dev image named <repo>:dev, or pass --image
 
-GDScript and TypeScript get the graph and `render` only for now (no `play`, `show` or `keep` yet).
+GDScript and TypeScript get the graph from bare `flowdiff` only for now (no `play`, `show` or `keep` yet).
 TypeScript needs `npm install -g typescript-language-server typescript` on top of the above. GDScript
 needs the `godot` binary on PATH (4.x; the LSP is TCP-only, flowdiff spawns and owns the editor process
 itself) and ast-grep's GDScript support, which isn't built in - build it once and register it where
@@ -36,9 +41,10 @@ flowdiff runs from:
 `flowdiff` reads the working tree against HEAD; `flowdiff <ref>` reads HEAD against `<ref>`;
 `flowdiff <A>..<B>` reads B against A, from a worktree checked out under `.flowdiff/head/<project>` —
 `show` and `keep` afterward read whichever tree the last `play` recorded in, no `--repo` needed to
-say so. Exit 0 rendered or ran, 1 the tool itself failed, 2 nothing to show or nothing could drive
-the flow, 3 values diverged under `--fail-on-diff`. `--split` draws the base revision's graph beside
-the head's, from a second language-server session rooted at the base worktree.
+say so. Exit 0 rendered or ran, 1 the tool itself failed, 2 nothing to show, nothing could drive the
+flow, or a C++ flow ran against the host build under `--fail-on-mock`, 3 values diverged under
+`--fail-on-diff`. `--split` draws the base revision's graph beside the head's, from a second
+language-server session rooted at the base worktree.
 
 ## A Python flow, on this repository's own history
 
@@ -142,6 +148,6 @@ is recorded again at exit, so `keep` can assert what changed as well as what cam
 
 ## Design
 
-Goal, non-goals and all 55 decisions are recorded in issue #7; open questions, risks and rejected
+Goal, non-goals and all the decisions are recorded in issue #7; open questions, risks and rejected
 alternatives in #8. Both are closed now that the design is fully implemented; reopen either to record
 a new decision or question.
