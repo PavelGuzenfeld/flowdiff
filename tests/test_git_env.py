@@ -3,11 +3,13 @@ it runs, and they override `-C`. Inherited, every git call flowdiff makes is
 silently redirected at whichever repo invoked it: the tool reads the wrong
 repository's diff, and the test fixtures stage into the commit being written."""
 
+import ast
 from pathlib import Path
 
 import pytest
 
-from conftest import git
+from conftest import SOURCE, git
+from flowdiff.changes import Revisions
 
 
 @pytest.fixture
@@ -70,12 +72,27 @@ def test_a_repo_built_under_a_polluted_environment_is_still_its_own_repo(
     assert git(other_repo, "rev-list", "--count", "--all").strip() == "0"
 
 
+def test_an_inherited_git_dir_does_not_change_which_revision_we_read(
+    repo, other_repo, monkeypatch
+):
+    """The other half of #83: git show reads objects, so only GIT_DIR can move it.
+    Asserting the right content, never emptiness — git_show turns a failure into ""."""
+    git(other_repo, "config", "user.email", "tests@example.invalid")
+    git(other_repo, "config", "user.name", "tests")
+    (other_repo / "a.py").write_text("def f(x):\n    return 'the invoking repo'\n")
+    git(other_repo, "add", "a.py")
+    git(other_repo, "commit", "-q", "-m", "init")
+    monkeypatch.setenv("GIT_DIR", str(other_repo / ".git"))
+
+    assert Revisions(repo, "HEAD", None).read_base(Path("a.py")) == SOURCE
+
+
 def test_the_scrubbed_set_is_read_from_git_rather_than_hardcoded():
     import subprocess
 
     from flowdiff.changes import _repo_scoped_vars
 
-    named = subprocess.run(["git", "rev-parse", "--local-env-vars"],
+    named = subprocess.run(["git", "rev-parse", "--local-env-vars"],  # scrub-exempt: the oracle
                            capture_output=True, text=True, check=True).stdout.split()
     # Equality, not a subset: a hardcoded handful satisfies a subset bound and
     # then quietly goes stale as git grows the list.
@@ -120,11 +137,37 @@ def test_only_the_repo_scoped_variables_are_dropped(monkeypatch):
     assert "PATH" in env  # or git stops being findable at all
 
 
-def test_no_other_module_shells_out_to_git_around_the_helper():
-    package = Path(__file__).resolve().parents[1] / "flowdiff"
-    offenders = sorted(
-        p.name for p in package.rglob("*.py")
-        if p.name != "changes.py" and '"git"' in p.read_text(encoding="utf-8")
-        and "REQUIRED_BINARIES" not in p.read_text(encoding="utf-8")
-    )
-    assert offenders == []
+SPAWNERS = frozenset({"run", "Popen", "call", "check_call", "check_output"})
+EXEMPT = "scrub-exempt"
+
+
+def _unscrubbed_git_calls(path: Path) -> list[int]:
+    """Lines spawning git with a literal argv. An argv assembled elsewhere stays
+    invisible; that needs dataflow, and a name is not evidence of a git call."""
+    lines = path.read_text(encoding="utf-8").splitlines()
+    spawned = []
+    for node in ast.walk(ast.parse("\n".join(lines))):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        func = node.func
+        name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+        argv = node.args[0]
+        if isinstance(argv, ast.List | ast.Tuple) and argv.elts:
+            argv = argv.elts[0]
+        is_git = isinstance(argv, ast.Constant) and isinstance(argv.value, str) and (
+            argv.value == "git" or argv.value.startswith("git "))
+        if name in SPAWNERS and is_git and not any(
+                EXEMPT in line for line in lines[node.lineno - 1:node.end_lineno]):
+            spawned.append(node.lineno)
+    return spawned
+
+
+def test_nothing_else_shells_out_to_git_around_the_helper():
+    root = Path(__file__).resolve().parents[1]
+    offenders = {
+        str(p.relative_to(root)): lines
+        for folder in ("flowdiff", "tests", "tools")
+        for p in sorted((root / folder).rglob("*.py"))
+        if p.name != "changes.py" and (lines := _unscrubbed_git_calls(p))
+    }
+    assert offenders == {}
