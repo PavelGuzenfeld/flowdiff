@@ -1,6 +1,9 @@
 from pathlib import Path
 
-from tools.mutation_gate import SCORE_EXEMPT, Result
+import pytest
+
+from conftest import git
+from tools.mutation_gate import SCORE_EXEMPT, Result, isolated_copy, touched_modules
 from tools.mutation_gate import tests_for as _tests_for
 
 
@@ -40,3 +43,58 @@ def test_the_real_subprocess_integration_file_sorts_after_play_s_other_test_file
     """-x must exhaust test_play_plans.py before it ever pays for test_play_integration.py."""
     files = _tests_for("flowdiff/play.py").split()
     assert files.index("tests/test_play_integration.py") == len(files) - 1
+
+
+@pytest.fixture
+def gated_repo(tmp_path_factory) -> Path:
+    """A repo shaped like the one the tool runs in: a package module, changed."""
+    root = tmp_path_factory.mktemp("gated")
+    git(root, "init", "-q", "-b", "main")
+    git(root, "config", "user.email", "tests@example.invalid")
+    git(root, "config", "user.name", "tests")
+    (root / "flowdiff").mkdir()
+    (root / "flowdiff" / "graph.py").write_text("x = 1\n")
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", "base")
+    (root / "flowdiff" / "graph.py").write_text("x = 2\n")
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", "change")
+    return root
+
+
+@pytest.fixture
+def invoking_repo(tmp_path_factory) -> Path:
+    """The repo a hook would point git at, sharing no filename with the one above."""
+    root = tmp_path_factory.mktemp("invoking")
+    git(root, "init", "-q", "-b", "main")
+    git(root, "config", "user.email", "tests@example.invalid")
+    git(root, "config", "user.name", "tests")
+    (root / "elsewhere.py").write_text("y = 1\n")
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", "init")
+    return root
+
+
+def test_an_inherited_git_dir_does_not_move_which_modules_count_as_touched(
+    gated_repo, invoking_repo, monkeypatch
+) -> None:
+    monkeypatch.setenv("GIT_DIR", str(invoking_repo / ".git"))
+    monkeypatch.chdir(gated_repo)
+
+    assert touched_modules("HEAD~1") == ["flowdiff/graph.py"]
+
+
+def test_an_inherited_index_does_not_choose_what_gets_copied(
+    gated_repo, invoking_repo, tmp_path, monkeypatch
+) -> None:
+    # ls-files names the files; their contents come from the working tree, so a
+    # foreign index names files this tree does not have.
+    monkeypatch.setenv("GIT_INDEX_FILE", str(invoking_repo / ".git" / "index"))
+    monkeypatch.chdir(gated_repo)
+    dest = tmp_path / "copy"
+    dest.mkdir()
+
+    isolated_copy(dest)
+
+    assert (dest / "flowdiff" / "graph.py").read_text() == "x = 2\n"
+    assert not (dest / "elsewhere.py").exists()

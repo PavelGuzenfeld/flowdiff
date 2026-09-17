@@ -10,6 +10,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+from flowdiff.changes import git
+
 PACKAGE = Path("flowdiff")
 # Rewording help text, log lines and error messages is not a defect; pinning that prose in a
 # test would lock wording rather than behaviour.
@@ -19,8 +21,7 @@ MUTMUT = str(_LOCAL_MUTMUT) if _LOCAL_MUTMUT.exists() else "mutmut"
 
 
 def touched_modules(base: str) -> list[str]:
-    out = subprocess.run(["git", "diff", "--name-only", f"{base}...HEAD", "--", f"{PACKAGE}/*.py"],
-                         check=True, capture_output=True, text=True).stdout
+    out = git(Path("."), "diff", "--name-only", f"{base}...HEAD", "--", f"{PACKAGE}/*.py")
     return sorted(p for p in out.split() if Path(p).is_file() and Path(p).name != "__init__.py")
 
 
@@ -34,10 +35,11 @@ def tests_for(module: str) -> str:
 
 
 def isolated_copy(dest: Path) -> None:
-    """mutmut rewrites sources in place, so it only ever runs on a throwaway copy."""
-    listing = subprocess.run(["git", "ls-files", "--cached", "--others", "--exclude-standard"],
-                             check=True, capture_output=True, text=True)
-    for name in listing.stdout.split():
+    """mutmut rewrites sources in place, so it only ever runs on a throwaway copy.
+    The listing names the working tree we copy contents from, so it has to come
+    from this repo's own index rather than whichever one a hook points git at."""
+    listing = git(Path("."), "ls-files", "--cached", "--others", "--exclude-standard")
+    for name in listing.split():
         target = dest / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(name, target)
