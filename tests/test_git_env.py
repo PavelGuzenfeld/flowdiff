@@ -83,6 +83,27 @@ def test_the_scrubbed_set_is_read_from_git_rather_than_hardcoded():
     assert len(named) > 8
 
 
+def test_a_probe_that_fails_falls_back_rather_than_scrubbing_nothing(monkeypatch):
+    """Asking git is the primary source, so a failed ask must not degrade to an
+    empty set: that passes GIT_DIR through and reinstates the bug."""
+    import subprocess
+
+    from flowdiff import changes
+
+    monkeypatch.setattr(changes.subprocess, "run",
+                        lambda *a, **k: subprocess.CompletedProcess([], 128, "", ""))
+    monkeypatch.setenv("GIT_DIR", "/somewhere/else/.git")
+    monkeypatch.setenv("GIT_INDEX_FILE", "/somewhere/else/.git/index")
+    changes._repo_scoped_vars.cache_clear()
+    try:
+        # The names, not REPO_SCOPED_FALLBACK: comparing the constant to itself
+        # would let it shrink to {"GIT_DIR"} and still pass the damaging half.
+        assert changes._repo_scoped_vars() == {"GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE"}
+        assert {"GIT_DIR", "GIT_INDEX_FILE"}.isdisjoint(changes._env())
+    finally:
+        changes._repo_scoped_vars.cache_clear()
+
+
 def test_only_the_repo_scoped_variables_are_dropped(monkeypatch):
     from flowdiff.changes import _env
 
