@@ -24,7 +24,8 @@ class FakeClient:
         self.calls = calls or {}
         self._references = references or {}
         self.config = ServerConfig(language, "fake", (), frozenset({".py"}), language,
-                                   references_need_open, import_kinds, test_function_prefix)
+                                   references_need_open=references_need_open, import_kinds=import_kinds,
+                                   test_function_prefix=test_function_prefix)
         self.opened: list[Path] = []
         self.prepared: list[str] = []
         self.unsupported: set[str] = set()

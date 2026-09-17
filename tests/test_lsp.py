@@ -395,6 +395,22 @@ def test_pyright_needs_documents_open_for_references_and_clangd_does_not(tmp_pat
     assert ts.import_kinds == ("import_statement",) and ts.test_function_prefix is None
 
 
+def test_the_servers_whose_references_are_incomplete_until_a_load_ends_declare_it(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(lsp, "find_compile_db", lambda root: None)
+    for suffix in (".cpp", ".ts"):
+        cfg = lsp.server_for(Path(f"x{suffix}"), tmp_path)
+        assert cfg and cfg.background_index is True, suffix
+    for suffix in (".py", ".gd"):
+        cfg = lsp.server_for(Path(f"x{suffix}"), tmp_path)
+        assert cfg and cfg.background_index is False, suffix
+
+
+def test_a_containerised_clangd_still_declares_its_background_index(tmp_path: Path):
+    from flowdiff import container
+    cfg = lsp.server_for(Path("x.cpp"), tmp_path, container.Container("img", "/src"))
+    assert cfg and cfg.background_index is True
+
+
 def test_flatten_marks_functions_inside_functions_as_nested_but_not_methods():
     r = {"start": {"line": 0, "character": 0}, "end": {"line": 9, "character": 0}}
     outer = {"name": "outer", "kind": 12, "range": r, "selectionRange": r,
