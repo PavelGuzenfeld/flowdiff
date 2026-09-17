@@ -264,20 +264,22 @@ def test_common_parser_pins_the_container_defaults():
 
 
 class FakeBaseClient:
-    def __init__(self, cpp=False):
+    def __init__(self, index_ready=True):
         self.waited = []
         self.closed = False
         self.root = Path("/base")
+        self.index_ready = index_ready
 
     def wait_for_index(self, timeout):
         self.waited.append(timeout)
-        return True
+        return self.index_ready
 
     def close(self):
         self.closed = True
 
 
-def split_fixture(monkeypatch, tmp_path: Path, language="python", changed_names=("scale",), base_names=("scale",)):
+def split_fixture(monkeypatch, tmp_path: Path, language="python", changed_names=("scale",), base_names=("scale",),
+                  index_ready=True):
     from flowdiff import graph, lsp, worktree
     from fake_client import FakeClient, symbol
     root, base = tmp_path / "root", tmp_path / ".flowdiff" / "base"
@@ -287,7 +289,7 @@ def split_fixture(monkeypatch, tmp_path: Path, language="python", changed_names=
     config = lsp.ServerConfig(language, "srv", (), frozenset({suffix}), language,
                               background_index=language == "cpp")
     monkeypatch.setattr(lsp, "server_for", lambda p, r, c=None: config)
-    fake = FakeBaseClient()
+    fake = FakeBaseClient(index_ready)
     monkeypatch.setattr(lsp, "LspClient", lambda cfg, r, timeout: fake)
     head_syms = {n: symbol(n, root / f"m{suffix}", i * 10) for i, n in enumerate(changed_names)}
     base_syms = [changes.ChangedSymbol(symbol(n, base / f"m{suffix}", i * 10), "body") for i, n in enumerate(base_names)]
@@ -321,9 +323,27 @@ def test_base_side_waits_for_the_index_and_builds_the_base_for_cpp(monkeypatch, 
     monkeypatch.setattr(container, "build", lambda ctr, tree, timeout: built.append((tree, timeout)) or None)
     assert len(cli.base_side(analysis, config, changed, flows, args)) == 1
     assert built == [(tmp_path / ".flowdiff" / "base", 9.0)] and fake.waited == [9.0]
+    assert analysis.warnings == []  # a server that did finish loading warns about nothing
     monkeypatch.setattr(container, "build", lambda ctr, tree, timeout: "ninja failed:\ndetail")
     assert cli.base_side(analysis, config, changed, flows, args) == []
     assert analysis.warnings == ["base graph skipped: ninja failed:"]
+
+
+def test_a_base_server_still_loading_warns_instead_of_thinning_the_base_graph(monkeypatch, tmp_path: Path, capsys):
+    from flowdiff import render
+    analysis, config, changed, flows, args, fake = split_fixture(monkeypatch, tmp_path, language="cpp",
+                                                                 index_ready=False)
+    monkeypatch.setattr(render, "render_graph", lambda f: "GRAPH")
+
+    analysis.flows = flows
+    analysis.base_flows = cli.base_side(analysis, config, changed, flows, args)
+    cli.render_all(analysis, full=False)
+
+    assert fake.waited == [9.0]
+    assert analysis.warnings == ["srv was still loading on the base revision; "
+                                 "the base graph may be missing callers"]
+    # The point of #82: --split drew a thinner base graph with nothing saying why.
+    assert "warning: srv was still loading on the base revision" in capsys.readouterr().err
 
 
 def test_base_side_is_empty_without_a_server_or_matching_symbols(monkeypatch, tmp_path: Path):
