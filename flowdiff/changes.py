@@ -50,13 +50,18 @@ class Revisions:
         return [self.base] if self.head is None else [self.base, self.head]
 
 
+# Union, never replacement: a probe that fails must not leave us scrubbing nothing.
+# These three are the ones that override `-C` and so redirect us at another repo.
+REPO_SCOPED_FALLBACK = frozenset({"GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE"})
+
+
 @functools.cache
 def _repo_scoped_vars() -> frozenset[str]:
     """The variables git itself considers repo-local. Asking git beats hardcoding
-    a list that a future version extends."""
+    a list a future version extends; the fallback covers the probe failing."""
     out = subprocess.run(["git", "rev-parse", "--local-env-vars"],
                          capture_output=True, text=True, check=False)
-    return frozenset(out.stdout.split())
+    return REPO_SCOPED_FALLBACK | frozenset(out.stdout.split())
 
 
 def _env() -> dict[str, str]:
