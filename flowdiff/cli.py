@@ -270,8 +270,9 @@ def base_side(analysis: Analysis, config: lsp.ServerConfig, changed: list[change
         base_changed = changes.base_symbols(client, analysis.root, base, changed)
         if not base_changed:
             return []
-        if base_config.background_index:
-            client.wait_for_index(args.build_timeout)
+        if base_config.background_index and not client.wait_for_index(args.build_timeout):
+            analysis.warnings.append(f"{base_config.binary} was still loading on the base revision; "
+                                     "the base graph may be missing callers")
         g = graph.build_graph(client, base_changed, args.hops)
         base_flows = graph.flows(client, g, base_changed, args.hops, False)
     finally:
