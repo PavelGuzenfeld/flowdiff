@@ -225,9 +225,10 @@ def analyse(args: argparse.Namespace, visit: Visitor | None = None) -> Analysis 
             changed = changes.changed_symbols(client, revs, server_hunks, config.ast_grep_language)
             if not changed:
                 continue
-            # clangd loads the compile database and starts indexing at the first didOpen, which changed_symbols sent.
-            if config.language_id == "cpp" and not client.wait_for_index(args.build_timeout):
-                analysis.warnings.append("clangd was still indexing when asked; callers and tests may be incomplete")
+            # The load starts at the first didOpen, which changed_symbols sent for every path it reports on.
+            if config.background_index and not client.wait_for_index(args.build_timeout):
+                analysis.warnings.append(f"{config.binary} was still loading when asked; "
+                                         "callers and tests may be incomplete")
             g = graph.build_graph(client, changed, args.hops)
             flows = graph.flows(client, g, changed, args.hops, not args.no_tests)
             if visit is not None:
@@ -269,7 +270,7 @@ def base_side(analysis: Analysis, config: lsp.ServerConfig, changed: list[change
         base_changed = changes.base_symbols(client, analysis.root, base, changed)
         if not base_changed:
             return []
-        if config.language_id == "cpp":
+        if base_config.background_index:
             client.wait_for_index(args.build_timeout)
         g = graph.build_graph(client, base_changed, args.hops)
         base_flows = graph.flows(client, g, base_changed, args.hops, False)

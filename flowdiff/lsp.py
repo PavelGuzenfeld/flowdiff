@@ -93,6 +93,9 @@ class ServerConfig:
     ast_grep_language: str
     # pyright answers textDocument/references only for open documents; clangd has a background index.
     references_need_open: bool = False
+    # clangd indexes and tsserver loads the project after the first didOpen; until that $/progress ends,
+    # references see only the open file. pyright's progress is per-request, so it has nothing to wait on.
+    background_index: bool = False
     # tree-sitter node kinds whose references are imports, not uses.
     import_kinds: tuple[str, ...] = ()
     # Only functions with this prefix count as covering tests; None keeps every reaching function.
@@ -139,12 +142,12 @@ def server_for(path: Path, root: Path, container: Any = None) -> ServerConfig | 
     if suffix in CPP_EXTENSIONS:
         if container is not None:
             return ServerConfig("cpp", "clangd", ("--background-index", f"--compile-commands-dir={container.compile_commands_dir}"),
-                                CPP_EXTENSIONS, "cpp",
+                                CPP_EXTENSIONS, "cpp", background_index=True,
                                 command_prefix=tuple(container.clangd_command(root, root / ".flowdiff")),
                                 uri_map=(uri_of(root), "file://" + container.workdir))
         db = find_compile_db(root)
         args = ("--background-index", f"--compile-commands-dir={db.parent}") if db else ("--background-index",)
-        return ServerConfig("cpp", "clangd", args, CPP_EXTENSIONS, "cpp")
+        return ServerConfig("cpp", "clangd", args, CPP_EXTENSIONS, "cpp", background_index=True)
     if suffix in PYTHON_EXTENSIONS:
         return ServerConfig("python", "pyright-langserver", ("--stdio",), PYTHON_EXTENSIONS, "python",
                             references_need_open=True,
@@ -154,7 +157,7 @@ def server_for(path: Path, root: Path, container: Any = None) -> ServerConfig | 
         # vitest/jest tests are anonymous callbacks passed to test()/it(), so there is no named-function
         # prefix to match; covering_tests() already falls back to <module> granularity without one.
         return ServerConfig("typescript", "typescript-language-server", ("--stdio",), TYPESCRIPT_EXTENSIONS,
-                            "typescript", import_kinds=("import_statement",))
+                            "typescript", background_index=True, import_kinds=("import_statement",))
     if suffix in GDSCRIPT_EXTENSIONS:
         port = free_port()
         return ServerConfig("gdscript", "godot", ("--path", str(root), "--headless", "--editor",
@@ -223,8 +226,8 @@ class LspClient:
         self.notify("initialized", {})
 
     def wait_for_index(self, timeout: float, grace: float = 2.0) -> bool:
-        """Block until every $/progress the server began has ended. clangd reports background indexing this
-        way; call hierarchy and references answer from that index. True when idle, False on timeout."""
+        """Block until every $/progress the server began has ended - clangd's background index, tsserver's
+        project load. Call hierarchy and references answer from it. True when idle, False on timeout."""
         with self._cond:
             if not self._cond.wait_for(lambda: bool(self._progress), grace):
                 return True

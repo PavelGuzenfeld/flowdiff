@@ -284,7 +284,8 @@ def split_fixture(monkeypatch, tmp_path: Path, language="python", changed_names=
     root.mkdir()
     monkeypatch.setattr(worktree, "base_worktree", lambda r, ref: base)
     suffix = ".py" if language == "python" else ".cpp"
-    config = lsp.ServerConfig(language, "srv", (), frozenset({suffix}), language)
+    config = lsp.ServerConfig(language, "srv", (), frozenset({suffix}), language,
+                              background_index=language == "cpp")
     monkeypatch.setattr(lsp, "server_for", lambda p, r, c=None: config)
     fake = FakeBaseClient()
     monkeypatch.setattr(lsp, "LspClient", lambda cfg, r, timeout: fake)
@@ -331,6 +332,56 @@ def test_base_side_is_empty_without_a_server_or_matching_symbols(monkeypatch, tm
     assert cli.base_side(analysis, config, changed, flows, args) == [] and fake.closed
     monkeypatch.setattr(lsp, "server_for", lambda p, r, c=None: None)
     assert cli.base_side(analysis, config, changed, flows, args) == []
+
+
+LOADING_WARNING = "srv was still loading when asked; callers and tests may be incomplete"
+
+
+def loading_fixture(monkeypatch, repo: Path, background_index: bool, idle: bool = True):
+    from flowdiff import lsp
+    from fake_client import FakeClient, symbol
+
+    class LoadingClient(FakeClient):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.waited: list[float] = []
+            self.prepared_when_waited: list[str] = []
+
+        def wait_for_index(self, timeout: float, grace: float = 2.0) -> bool:
+            self.waited.append(timeout)
+            self.prepared_when_waited = list(self.prepared)
+            return idle
+
+    (repo / "a.py").write_text(SOURCE.replace("x + 1", "x + 3"))
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/x")
+    monkeypatch.setattr(changes, "comment_spans", lambda *a: [])
+    config = lsp.ServerConfig("python", "srv", (), lsp.PYTHON_EXTENSIONS, "python",
+                              background_index=background_index)
+    monkeypatch.setattr(lsp, "server_for", lambda p, r, c=None: config)
+    client = LoadingClient(repo, {"f": symbol("f", repo / "a.py", 0, last=2)})
+    monkeypatch.setattr(lsp, "LspClient", lambda cfg, root, timeout: client)
+    args = cli.build_parser().parse_args(["--repo", str(repo), "--build-timeout", "7"])
+    return cli.analyse(args), client
+
+
+def test_analyse_waits_out_the_load_before_it_asks_the_server_anything_about_the_graph(monkeypatch, repo: Path):
+    analysis, client = loading_fixture(monkeypatch, repo, background_index=True)
+    assert isinstance(analysis, cli.Analysis) and LOADING_WARNING not in analysis.warnings
+    assert client.waited == [7.0]
+    assert client.prepared_when_waited == [] and client.prepared == ["f"]
+    assert [n.name for f in analysis.flows for n in f.changed] == ["f"]
+
+
+def test_analyse_warns_by_name_when_the_server_was_still_loading(monkeypatch, repo: Path):
+    analysis, client = loading_fixture(monkeypatch, repo, background_index=True, idle=False)
+    assert isinstance(analysis, cli.Analysis) and client.waited == [7.0]
+    assert analysis.warnings[0] == LOADING_WARNING
+
+
+def test_analyse_does_not_wait_for_a_server_that_answers_from_open_documents(monkeypatch, repo: Path):
+    analysis, client = loading_fixture(monkeypatch, repo, background_index=False, idle=False)
+    assert isinstance(analysis, cli.Analysis) and LOADING_WARNING not in analysis.warnings
+    assert client.waited == []
 
 
 def test_analyse_builds_in_the_container_for_cpp_hunks_and_reports_detection_failures(monkeypatch, repo: Path, capsys):
