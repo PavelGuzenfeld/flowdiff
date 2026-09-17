@@ -1,7 +1,9 @@
 """Changed symbols: git diff -U0 hunks intersected with LSP documentSymbol ranges."""
 from __future__ import annotations
 
+import functools
 import json
+import os
 import re
 import subprocess
 import tempfile
@@ -48,14 +50,30 @@ class Revisions:
         return [self.base] if self.head is None else [self.base, self.head]
 
 
+@functools.cache
+def _repo_scoped_vars() -> frozenset[str]:
+    """The variables git itself considers repo-local. Asking git beats hardcoding
+    a list that a future version extends."""
+    out = subprocess.run(["git", "rev-parse", "--local-env-vars"],
+                         capture_output=True, text=True, check=False)
+    return frozenset(out.stdout.split())
+
+
+def _env() -> dict[str, str]:
+    """Environment with git's repo-local variables dropped. Git exports GIT_DIR
+    and GIT_INDEX_FILE into every hook it runs, and they override `-C`, so
+    inherited they silently point us at whichever repo invoked us (#83)."""
+    return {k: v for k, v in os.environ.items() if k not in _repo_scoped_vars()}
+
+
 def git(repo: Path, *args: str) -> str:
     return subprocess.run(["git", "-C", str(repo), *args], check=True,
-                          capture_output=True, text=True).stdout
+                          capture_output=True, text=True, env=_env()).stdout
 
 
 def git_show(repo: Path, rev: str, path: Path) -> str:
     result = subprocess.run(["git", "-C", str(repo), "show", f"{rev}:{path.as_posix()}"],
-                            capture_output=True, text=True)
+                            capture_output=True, text=True, env=_env())
     return result.stdout if result.returncode == 0 else ""
 
 
