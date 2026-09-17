@@ -1,14 +1,12 @@
-import subprocess
 from pathlib import Path
 
 import pytest
 
+# The same helper the tool uses, not a copy of it. A second implementation is a
+# second place to forget that git exports GIT_DIR into hooks (#83).
+from flowdiff.changes import git
+
 SOURCE = "def f(x):\n    return x + 1\n\n\ndef g(y):\n    return f(y) * 2\n"
-
-
-def git(repo: Path, *args: str) -> str:
-    return subprocess.run(["git", "-C", str(repo), *args], check=True,
-                          capture_output=True, text=True).stdout
 
 
 @pytest.fixture
