@@ -397,7 +397,7 @@ def test_pyright_needs_documents_open_for_references_and_clangd_does_not(tmp_pat
 
 def test_the_servers_whose_references_are_incomplete_until_a_load_ends_declare_it(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(lsp, "find_compile_db", lambda root: None)
-    for suffix in (".cpp", ".ts"):
+    for suffix in (".cpp", ".ts", ".tsx"):
         cfg = lsp.server_for(Path(f"x{suffix}"), tmp_path)
         assert cfg and cfg.background_index is True, suffix
     for suffix in (".py", ".gd"):
